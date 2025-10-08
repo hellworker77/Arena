@@ -6,16 +6,16 @@ export const Nav = () => {
             </p>
             <div className="flex space-x-6">
                 <a
-                    href="#"
+                    href="/home"
                     className="text-gray-300 hover:text-red-400 cursor-pointer transition drop-shadow-[0_0_6px_rgba(255,50,50,0.7)]"
                 >
                     Home
                 </a>
                 <a
-                    href="#"
+                    href="/scene"
                     className="text-gray-300 hover:text-red-400 cursor-pointer transition drop-shadow-[0_0_6px_rgba(255,50,50,0.7)]"
                 >
-                    About
+                    Pixi
                 </a>
                 <a
                     href="#"

@@ -1,14 +1,19 @@
-import {PixiCanvas} from "../../tamplates/pixi/pixiCanvas.tsx";
 import {Page} from "../../tamplates/page/page.tsx";
+import {Canvas} from "../../tamplates/game/canvas.tsx";
 
 export const Scene = () => {
 
     return (
         <Page>
-            <Page.Title title={"scene"}/>
+
             <Page.Body>
-                <PixiCanvas />
+                <Canvas />
             </Page.Body>
+            <Page.Footer>
+                <div className="h-40">
+
+                </div>
+            </Page.Footer>
         </Page>
     )
 }
