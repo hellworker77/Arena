@@ -1,13 +1,4 @@
-using FelCache;
-
 var builder = WebApplication.CreateBuilder(args);
-
-builder.Services.AddFelCache(options =>
-{
-    options.Ttl = 30000;
-    
-    options.BaseUrl = builder.Configuration["FelCache:Url"];
-});
 
 builder.Services.AddOpenApi();
 
