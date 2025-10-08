@@ -7,14 +7,11 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.9"/>
+        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.7"/>
     </ItemGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\FelCache\FelCache.csproj" />
-    </ItemGroup>
-
-    <ItemGroup>
+      <Folder Include="Controllers\" />
       <Folder Include="Migrations\" />
     </ItemGroup>
 
