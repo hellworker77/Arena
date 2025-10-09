@@ -1,4 +1,11 @@
+using Identity;
+
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services
+    .AddRsaPem()
+    .AddRepositories()
+    .AddServices();
 
 builder.Services.AddOpenApi();
 
