@@ -1,14 +1,17 @@
+version: "3"
+
 services:
-    postgres:
-        image: postgres:latest
-        container_name: felDb
-        environment:
-            POSTGRES_USER: admin
-            POSTGRES_PASSWORD: admin
-            POSTGRES_DB: felDb
-        volumes:
-            - postgres_data:/var/lib/postgresql/data
-        ports:
-            - "5432:5432"
+  database:
+    image: postgres:latest
+    container_name: arenaDb
+    ports:
+      - 13421:5432
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: felDb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
 volumes:
-    postgres_data:
+  postgres_data:
