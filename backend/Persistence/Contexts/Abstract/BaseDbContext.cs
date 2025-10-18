@@ -4,7 +4,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Persistence.Contexts.Abstract;
 
-public abstract class BaseDbContext: DbContext
+public abstract class BaseDbContext<TContext>(DbContextOptions<TContext> options) : DbContext(options)
+    where TContext : DbContext
 {
     public override int SaveChanges()
     {
@@ -17,7 +18,7 @@ public abstract class BaseDbContext: DbContext
         UpdateTimestamps();
         return base.SaveChangesAsync(cancellationToken);
     }
-    
+
     private void UpdateTimestamps()
     {
         var entries = ChangeTracker.Entries<EventInfEntity>();

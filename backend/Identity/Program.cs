@@ -5,17 +5,12 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services
     .AddRsaPem()
     .AddRepositories()
-    .AddServices();
-
-builder.Services.AddOpenApi();
+    .AddServices()
+    .AddDbContexts(builder.Configuration);
 
 builder.Services.AddControllers();
 
-builder.Services.AddEndpointsApiExplorer();
-
 var app = builder.Build();
-
-app.UseHttpsRedirection();
 
 app.MapControllers();
 

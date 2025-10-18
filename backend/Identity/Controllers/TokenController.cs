@@ -9,13 +9,6 @@ namespace Identity.Controllers;
 public class TokenController(ITokenService tokenService) : ControllerBase
 {
     /// <summary>
-    /// JWKS endpoint to retrieve the public keys for token validation.
-    /// </summary>
-    [HttpGet(".well-known/jwks.json")]
-    public async Task<Jwks> GetJwks(CancellationToken ct)
-        => await tokenService.GetJwksAsync(ct);
-    
-    /// <summary>
     /// Creates a new JWT token for the authenticated user.
     /// </summary>
     [HttpPost]

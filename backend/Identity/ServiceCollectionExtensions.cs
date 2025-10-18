@@ -47,8 +47,6 @@ internal static class ServiceCollectionExtensions
     internal static IServiceCollection AddDbContexts(this IServiceCollection services,
         IConfiguration configuration)
     {
-        services.AddScoped<IApplicationDbContextBootstrapper, ApplicationDbContextBootstrapper>();
-        
         var connectionString = configuration.GetConnectionString("masterDb")
                                ?? throw new InvalidOperationException("Connection string 'masterDb' not found.");
 

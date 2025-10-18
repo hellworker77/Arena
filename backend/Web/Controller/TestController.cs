@@ -1,11 +1,12 @@
 using FelCache;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Web.Controller;
 
 [ApiController]
 [Route("api/[controller]")]
-public class TestController
+public class TestController: ControllerBase
 {
     private readonly FelCacheClient _felCacheClient;
     
@@ -14,13 +15,10 @@ public class TestController
         _felCacheClient = client;
     }
     
-    
+    [Authorize(Roles = "Admin")]
     [HttpGet]
     public int Test()
     {
-        _felCacheClient.SetAsync("test-key", 25, null).Wait();
-        var (found, value) = _felCacheClient.GetAsync<int>("test-key").Result;
-
-        return value;
+        return 5;
     }
 }

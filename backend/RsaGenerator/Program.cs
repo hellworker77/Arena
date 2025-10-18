@@ -13,7 +13,7 @@ Console.WriteLine("Keys generated and saved to private.pem and public.pem");
 
 string ExportPrivateKeyPem(RSA rsa)
 {
-    var key = rsa.ExportRSAPrivateKey();
+    var key = rsa.ExportPkcs8PrivateKey();
     
     return "-----BEGIN PRIVATE KEY-----\n" +
            Convert.ToBase64String(key, Base64FormattingOptions.InsertLineBreaks) +
@@ -22,7 +22,7 @@ string ExportPrivateKeyPem(RSA rsa)
 
 string ExportPublicKeyPem(RSA rsa)
 {
-    var key = rsa.ExportRSAPublicKey();
+    var key = rsa.ExportSubjectPublicKeyInfo();
     
     return "-----BEGIN PUBLIC KEY-----\n" +
            Convert.ToBase64String(key, Base64FormattingOptions.InsertLineBreaks) +
