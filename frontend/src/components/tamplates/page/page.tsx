@@ -3,7 +3,7 @@ import {useTranslation} from "react-i18next";
 
 export const Page = ({ children }: PropsWithChildren) => {
     return (
-        <main className="flex-1 flex flex-col items-center justify-center w-full h-full rounded-xl shadow-[0_0_15px_rgba(255,0,0,0.3)] p-6 bg-gradient-to-b from-gray-900 via-black to-gray-950 border border-red-900 select-none">
+        <main className="flex-1 flex flex-col items-center justify-center w-full h-full rounded-xl shadow-[0_0_15px_rgba(255,0,0,0.3)] bg-gradient-to-b from-gray-900 via-black to-gray-950 border border-red-900 select-none overflow-hidden">
             {children}
         </main>
     );
@@ -14,9 +14,9 @@ type TitleProps = {
 };
 
 const Title = ({ title }: TitleProps) => {
-    const {t} = useTranslation()
+    const { t } = useTranslation();
     return (
-        <div className="flex items-start text-left justify-between mb-6">
+        <div className="flex items-start text-left justify-between p-4">
             <h2 className="text-2xl font-bold text-red-500 tracking-wider drop-shadow-[0_0_8px_rgba(255,0,0,0.7)]">
                 {t(title)}
             </h2>
@@ -26,7 +26,7 @@ const Title = ({ title }: TitleProps) => {
 
 const Body = ({ children }: PropsWithChildren) => {
     return (
-        <div className="flex-1text-gray-300 mb-6 leading-relaxed w-full h-full">
+        <div className="flex-1 w-full h-full m-0 p-0 flex items-center justify-center overflow-hidden">
             {children}
         </div>
     );
@@ -34,7 +34,7 @@ const Body = ({ children }: PropsWithChildren) => {
 
 const Footer = ({ children }: PropsWithChildren) => {
     return (
-        <div className="text-right text-sm text-gray-500 border-t border-red-900 pt-2">
+        <div className="text-right text-sm text-gray-500 border-t border-red-900 pt-2 px-4">
             {children}
         </div>
     );

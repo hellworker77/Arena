@@ -9,5 +9,9 @@ export type AppRoute = {
     component: JSX.Element | null;
 
     subroutes?: AppRoute[];
+
+    authorizationRequired?: boolean;
+
+    container: "side" | "nav" | "both";
 }
 

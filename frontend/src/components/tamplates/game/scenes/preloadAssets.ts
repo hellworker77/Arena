@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import {createSquare} from "../primitives/createSquare.ts";
 
 export class PreloadAssets extends Phaser.Scene {
 
@@ -10,7 +11,10 @@ export class PreloadAssets extends Phaser.Scene {
 
     preload(): void {
         this.load.image("enemy", "assets/sprites/enemy.png");
-        this.load.image("player", "assets/sprites/player.png");
+
+        createSquare(this, "player")
+
+        this.load.image("particle", "assets/sprites/projectile.png");
         this.load.image("projectile", "assets/sprites/projectile.png");
     }
 

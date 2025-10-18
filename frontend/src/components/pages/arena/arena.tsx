@@ -1,10 +1,12 @@
+import {Page} from "../../tamplates/page/page.tsx";
 import {useEffect, useRef} from "react";
 import Phaser from "phaser";
-import {PreloadAssets} from "./preloadAssets";
-import {PlayGame} from "./playGame";
-import {gameOptions} from "./gameOptions";
+import {gameOptions} from "../../tamplates/game/options/gameOptions.ts";
+import {PreloadAssets} from "../../tamplates/game/scenes/preloadAssets.ts";
+import {PlayGame} from "../../tamplates/game/scenes/playGame.ts";
 
-export const Canvas = () => {
+export const Arena = () => {
+
     const divRef = useRef<HTMLDivElement | null>(null);
     const gameRef = useRef<Phaser.Game | null>(null);
 
@@ -13,11 +15,11 @@ export const Canvas = () => {
         if(!container) return;
 
         const scaleObject = {
-            mode: Phaser.Scale.NONE,
+            mode: Phaser.Scale.FIT,
             autoCenter: Phaser.Scale.NONE,
+            width: container.clientWidth,
+            height: container.clientHeight,
             parent: container,
-            width: gameOptions.gameSize.width,
-            height: gameOptions.gameSize.height
         }
 
         const configObject: Phaser.Types.Core.GameConfig = {
@@ -45,7 +47,13 @@ export const Canvas = () => {
         };
     }, []);
 
-    return <div ref={divRef}
-                className="w-full h-full">
-    </div>;
-};
+    return (
+        <Page>
+            <Page.Body>
+                <div ref={divRef}
+                     className="w-full h-full">
+                </div>
+            </Page.Body>
+        </Page>
+    )
+}
