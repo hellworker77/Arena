@@ -3,17 +3,19 @@ import {initReactI18next} from "react-i18next";
 
 import enGlobal from "./en/global.json"
 import enRouting from "./en/routing.json"
+import enItem from "./en/item.json"
 
 import ruGlobal from "./ru/global.json"
 import ruRouting from "./ru/routing.json"
+import ruItem from "./ru/item.json"
 
 
 export const resources = {
     en: {
-        translation: {...enGlobal, ...enRouting}
+        translation: {...enGlobal, ...enRouting, ...enItem}
     },
     ru: {
-        translation: {...ruGlobal, ...ruRouting}
+        translation: {...ruGlobal, ...ruRouting, ...ruItem}
     }
 };
 

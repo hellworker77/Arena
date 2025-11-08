@@ -90,7 +90,7 @@ export const BreadCrumb = () => {
                                 to={crumb.path}
                                 className="cursor-pointer hover:text-red-300 hover:drop-shadow-[0_0_6px_rgba(255,80,80,0.8)] transition"
                             >
-                                {crumb.name}
+                                {t(crumb.name)}
                             </NavLink>
                         )}
                         {!isLast && (

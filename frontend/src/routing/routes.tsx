@@ -4,9 +4,7 @@ import type {JSX} from "react";
 import {Route} from "react-router-dom";
 import {Arena} from "../components/pages/arena/arena.tsx";
 import {Auction} from "../components/pages/auction/auction.tsx";
-import {Character} from "../components/pages/character/character.tsx";
 import {Friends} from "../components/pages/friends/friends.tsx";
-import {Inventory} from "../components/pages/inventory/inventory.tsx";
 import {LeaderBoard} from "../components/pages/leaderBoard/leaderBoard.tsx";
 import {Market} from "../components/pages/market/market.tsx";
 import {Settings} from "../components/pages/settings/settings.tsx";
@@ -14,13 +12,16 @@ import {Social} from "../components/pages/social/social.tsx";
 import {Mail} from "../components/pages/mail/mail.tsx";
 import {PatchNotes} from "../components/pages/patchNotes/patchNotes.tsx";
 import {News} from "../components/pages/news/news.tsx";
+import {SkillTree} from "../components/pages/character/skillTree/skillTree.tsx";
+import {Inventory} from "../components/pages/character/inventory/inventory.tsx";
 
 export const ARENA_ROUTE = "arena";
 export const AUCTION_ROUTE = "auction";
 export const CHARACTER_ROUTE = "character";
+export const INVENTORY_SUBROUTE = "inventory";
+export const SKILL_TREE_SUBROUTE = "skill-tree";
 export const FRIENDS_ROUTE = "friends";
 export const HOME_ROUTE = "home";
-export const INVENTORY_ROUTE = "inventory";
 export const LEADERBOARD_ROUTE = "leaderboard";
 export const MAIL_ROUTE = "mail";
 export const MARKET_ROUTE = "market";
@@ -46,10 +47,26 @@ export const app_routes: AppRoute[] = [
     },
     {
         path: CHARACTER_ROUTE,
-        component: <Character/>,
+        component: null,
         name: "character",
         authorizationRequired: true,
-        container: "side"
+        container: "side",
+        subroutes: [
+            {
+                path: INVENTORY_SUBROUTE,
+                component: <Inventory/>,
+                name: "inventory",
+                authorizationRequired: true,
+                container: "side"
+            },
+            {
+                path: SKILL_TREE_SUBROUTE,
+                component: <SkillTree/>,
+                name: "skill-tree",
+                authorizationRequired: true,
+                container: "side"
+            }
+        ],
     },
     {
         path: FRIENDS_ROUTE,
@@ -63,13 +80,6 @@ export const app_routes: AppRoute[] = [
         component: <Home/>,
         name: "home",
         container: "both"
-    },
-    {
-        path: INVENTORY_ROUTE,
-        component: <Inventory/>,
-        name: "inventory",
-        authorizationRequired: true,
-        container: "side"
     },
     {
         path: LEADERBOARD_ROUTE,

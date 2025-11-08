@@ -1,0 +1,48 @@
+[server]
+# Server address and port
+server_address = "127.0.0.1:6809"
+
+# Server mode "rest" or "grpc"
+server_mode = "rest"
+
+# CORS settings
+cors_allowed_origins = ["*"]
+
+cors_allowed_methods = ["GET", "POST", "PUT", "DELETE"]
+
+cors_allowed_headers = ["Content-Type", "Authorization"]
+
+# Maximum number of concurrent connections
+max_concurrent_connections = 10
+
+[logging]
+# Enable logging
+enable_logging = true
+
+# Logging level
+logging_level = "info"
+
+[jwt]
+# JWT authority
+authority = "http://localhost:5203"
+
+# JWT audience
+audience = "Microservices"
+
+# jwks rotation interval in seconds
+rotation_interval_secs = 3600
+
+# jwks auto refresh interval in seconds
+auto_refresh_interval_secs = 300
+
+[cache]
+# Cache item size
+max_cache_size = 26214400  # 25 mb
+
+# Maximum total cache size
+max_total_cache_size = 1073741824  # 1 gb
+
+# Cache item expiration in seconds
+cache_item_expiration_secs = 3600  # 1 hour
+
+

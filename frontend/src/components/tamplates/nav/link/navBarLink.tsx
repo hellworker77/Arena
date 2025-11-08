@@ -29,7 +29,7 @@ export const NavBarLink = ({
             {...props}
             className={({ isActive }) =>
                 clsx(
-                    "block px-4 py-2 rounded-lg font-medium transition-colors duration-200 cursor-pointer",
+                    "block px-4 py-2 rounded-lg transition-colors font-bold duration-200 cursor-pointer",
                     VARIANT_CLASSES[variant],
                     isActive &&
                     (activeGlow

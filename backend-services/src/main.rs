@@ -1,30 +1,15 @@
-use clap::{Parser, Subcommand};
+use std::process::Command;
 
-#[derive(Parser)]
-#[command(name = "felapp")]
-#[command(about = "Multi-service CLI for FelApp", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    Cache {
-        #[arg(long, default_value = "0.0.0.0:50051")]
-        addr: String,
-    },
+fn clear_console() {
+    if cfg!(target_os = "windows") {
+        Command::new("cmd").args(&["/C", "cls"]).status().unwrap();
+    } else {
+        Command::new("clear").status().unwrap();
+    }
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Cache { addr } => {
-            cache::run(addr).await.map_err(|e| anyhow::Error::msg(e))?;
-        }
-    }
-
-    Ok(())
+async fn main() {
+    clear_console();
+    rusty_blob::run().await;
 }

@@ -8,16 +8,15 @@ export const Nav = () => {
     const isAuthorized = true; // TODO: replace with real authorization check
 
     return (
-        <header className="flex items-center justify-between px-6 py-4 bg-gradient-to-b from-black via-gray-900 to-black shadow-lg border-b border-red-800 select-none">
-            <p className="text-2xl font-bold text-red-500 drop-shadow-[0_0_8px_rgba(255,0,0,0.7)] tracking-wider cursor-pointer">
-                Wow Source 2.0
-            </p>
-            <div className="flex space-x-6">
+        <header className="flex items-center justify-between px-6 py-4 h-16
+    bg-black/20 shadow-lg border-b border-black/20 select-nonerelative">
+
+            <div className="absolute left-1/2 transform -transient-x-1/2 flex space-x-6">
                 {app_routes
                     .filter(route => route.container === "nav" || route.container === "both")
                     .filter(route => !route.authorizationRequired || isAuthorized)
-                    .map(route => (
-                        <NavBarLink to={route.path}>
+                    .map((route, i) => (
+                        <NavBarLink key={`route-${i}`} variant="light" to={route.path}>
                             {t(`${route.name}`)}
                         </NavBarLink>
                     ))}
