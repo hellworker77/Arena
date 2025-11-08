@@ -21,21 +21,24 @@ public class TokenService : ITokenService
     private readonly IUserManager _userManager;
     private readonly IRoleManager _roleManager;
     private readonly IJwtTokenRepository _jwtTokenRepository;
+    private readonly IMachineClientRepository _machineClientRepository;
 
     private static readonly int AccessTokenLifetimeMinutes = 60;
     private static readonly int RefreshTokenLifetimeDays = 7;
 
     public TokenService(ApplicationDbContext dbContext,
         IConfiguration configuration,
-        RsaPem pem, 
+        RsaPem pem,
         IUserManager userManager,
         IRoleManager roleManager,
-        IJwtTokenRepository jwtTokenRepository)
+        IJwtTokenRepository jwtTokenRepository,
+        IMachineClientRepository machineClientRepository)
     {
         _pem = pem;
         _userManager = userManager;
         _roleManager = roleManager;
         _jwtTokenRepository = jwtTokenRepository;
+        _machineClientRepository = machineClientRepository;
         _dbContext = dbContext;
         _configuration = configuration;
 
@@ -43,10 +46,10 @@ public class TokenService : ITokenService
         _privateRsa.ImportFromPem(_pem.privatePem);
     }
 
-    public async Task<Jwks> GetJwksAsync(CancellationToken cancellationToken = default)
+    public async Task<Jwks> GetJwksAsync()
     {
         using var rsaPublic = RSA.Create();
-        
+
         rsaPublic.ImportFromPem(_pem.publicPem);
 
         var key = new RsaSecurityKey(rsaPublic);
@@ -65,7 +68,7 @@ public class TokenService : ITokenService
                 }
             ]
         };
-        
+
         return await Task.FromResult(result);
     }
 
@@ -73,22 +76,26 @@ public class TokenService : ITokenService
         CancellationToken cancellationToken = default)
     {
         var user = await _userManager.GetByLoginAsync(loginDto.Login, cancellationToken)
-            ?? throw new UnauthorizedAccessException("Invalid login or password");
+                   ?? throw new UnauthorizedAccessException("Invalid login or password");
 
         if (!await _userManager.ValidatePasswordAsync(user, loginDto.Password, cancellationToken))
             throw new UnauthorizedAccessException("Invalid login or password");
 
-        var accessToken = await GenerateJwtAsync(user, cancellationToken);
+        var roleNames = await _roleManager.GetUserRolesAsync(user.Id, cancellationToken);
+
+        var claims = GetClaimsForUser(user, roleNames);
+        
+        var accessToken = GenerateJwt(claims);
+        var accessTokenString = new JwtSecurityTokenHandler().WriteToken(accessToken);
         var refreshToken = GenerateRefreshToken();
         var hashedRefreshToken = HashToken(refreshToken);
-
-        var accessLifeTime = _configuration.GetValue("Jwt:AccessTokenLifetimeMinutes", AccessTokenLifetimeMinutes);
-        var refreshLifeTime = _configuration.GetValue("Jwt:RefreshTokenLifetimeDays", RefreshTokenLifetimeDays);
         
+        var refreshLifeTime = _configuration.GetValue("Jwt:RefreshTokenLifetimeDays", RefreshTokenLifetimeDays);
+
         var jwt = new JwtToken
         {
-            AccessTokenHash = accessToken,
-            AccessTokenExpiresAt = DateTime.UtcNow.AddMinutes(accessLifeTime),
+            AccessTokenHash = accessTokenString,
+            AccessTokenExpiresAt = accessToken.ValidTo,
             RefreshTokenHash = hashedRefreshToken,
             RefreshTokenExpiresAt = DateTime.UtcNow.AddDays(refreshLifeTime),
             UserId = user.Id,
@@ -97,10 +104,10 @@ public class TokenService : ITokenService
 
         await _jwtTokenRepository.SaveJwtAsync(jwt, cancellationToken);
         await _jwtTokenRepository.RetainOldTokensAsync(user.Id, cancellationToken: cancellationToken);
-        
+
         return new Jwt
         {
-            AccessToken = accessToken,
+            AccessToken = accessTokenString,
             RefreshToken = refreshToken,
             ExpiresAt = jwt.AccessTokenExpiresAt
         };
@@ -113,20 +120,20 @@ public class TokenService : ITokenService
 
         var tokenEntity = await _jwtTokenRepository.GetByRefreshTokenHashAsync(hashedToken, cancellationToken)
                           ?? throw new UnauthorizedAccessException("Invalid or expired refresh token");
-        
+
         if (tokenEntity.IsRevoked || tokenEntity.RefreshTokenExpiresAt <= DateTime.UtcNow)
             throw new UnauthorizedAccessException("Invalid or expired refresh token");
 
         tokenEntity.IsRevoked = true;
         await _jwtTokenRepository.UpdateJwtAsync(tokenEntity, cancellationToken);
-        
+
         var newRefreshToken = GenerateRefreshToken();
         var newHashedRefreshToken = HashToken(newRefreshToken);
-        
+
         var accessLifeTime = _configuration.GetValue("Jwt:AccessTokenLifetimeMinutes", AccessTokenLifetimeMinutes);
         var refreshLifeTime = _configuration.GetValue("Jwt:RefreshTokenLifetimeDays", RefreshTokenLifetimeDays);
-        
-        var newToken  = new JwtToken
+
+        var newToken = new JwtToken
         {
             AccessTokenHash = tokenEntity.AccessTokenHash,
             AccessTokenExpiresAt = DateTime.UtcNow.AddMinutes(accessLifeTime),
@@ -135,17 +142,19 @@ public class TokenService : ITokenService
             UserId = tokenEntity.UserId,
             IsRevoked = false
         };
-        
+
         await _jwtTokenRepository.SaveJwtAsync(newToken, cancellationToken);
-        await _jwtTokenRepository.RetainOldTokensAsync(tokenEntity.UserId, cancellationToken: cancellationToken);
         
+        if(tokenEntity.UserId.HasValue)
+            await _jwtTokenRepository.RetainOldTokensAsync(tokenEntity.UserId.Value, cancellationToken: cancellationToken);
+
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return new Jwt
         {
             AccessToken = newToken.AccessTokenHash,
             RefreshToken = newRefreshToken,
-            ExpiresAt =  newToken.AccessTokenExpiresAt
+            ExpiresAt = newToken.AccessTokenExpiresAt
         };
     }
 
@@ -153,9 +162,9 @@ public class TokenService : ITokenService
         CancellationToken cancellationToken = default)
     {
         var hashed = HashToken(refreshToken);
-        
+
         var tokenEntity = await _jwtTokenRepository.GetByRefreshTokenHashAsync(hashed, cancellationToken);
-        
+
         if (tokenEntity != null)
         {
             tokenEntity.IsRevoked = true;
@@ -163,13 +172,42 @@ public class TokenService : ITokenService
         }
     }
 
-    private async Task<string> GenerateJwtAsync(ApplicationUser user,
+    public async Task<Jwt> CreateMachineClientJwtAsync(ClientCredentialsDto clientCredentials,
         CancellationToken cancellationToken = default)
     {
-        var credentials = new SigningCredentials(new RsaSecurityKey(_privateRsa), SecurityAlgorithms.RsaSha256);
+        var machineClient =
+            await _machineClientRepository.GetMachineClientAsync(clientCredentials.ClientId, cancellationToken)
+            ?? throw new UnauthorizedAccessException("Invalid client credentials");
+        
+        var providedSecretHash = HashToken(clientCredentials.ClientSecret);
+        
+        if(!string.Equals(providedSecretHash, machineClient.ClientSecretHash, StringComparison.Ordinal))
+            throw new UnauthorizedAccessException("Invalid client credentials");
 
-        var roleNames = await _roleManager.GetUserRolesAsync(user.Id, cancellationToken);
+        var claims = GetClaimsForMachineClient(machineClient.ClientId, machineClient.Description);
+        var accessToken = GenerateJwt(claims);
+        var accessTokenString = new JwtSecurityTokenHandler().WriteToken(accessToken);
+        
+        var jwt = new JwtToken
+        {
+            AccessTokenHash = accessTokenString,
+            AccessTokenExpiresAt = accessToken.ValidTo,
+            MachineClientId = machineClient.Id,
+            IsRevoked = false
+        };
 
+        await _jwtTokenRepository.SaveJwtAsync(jwt, cancellationToken);
+        await _jwtTokenRepository.RetainOldMachineClientTokensAsync(machineClient.Id, cancellationToken: cancellationToken);
+
+        return new Jwt
+        {
+            AccessToken = accessTokenString,
+            ExpiresAt = jwt.AccessTokenExpiresAt
+        };
+    }
+    
+    private List<Claim> GetClaimsForUser(ApplicationUser user, IReadOnlyList<string> roleNames)
+    {
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
@@ -177,9 +215,34 @@ public class TokenService : ITokenService
             new(JwtRegisteredClaimNames.Email, user.Email),
             new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
         };
-        
+
         claims.AddRange(roleNames.Select(rn => new Claim(ClaimTypes.Role, rn)));
 
+        return claims;
+    }
+    
+    private List<Claim> GetClaimsForMachineClient(string clientId, string? description)
+    {
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, clientId),
+            new("client_id", clientId),
+            new("grant_type", "client_credentials"),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+        };
+
+        if (!string.IsNullOrEmpty(description))
+        {
+            claims.Add(new("description", description));
+        }
+
+        return claims;
+    }
+
+    private JwtSecurityToken GenerateJwt(List<Claim> claims)
+    {
+        var credentials = new SigningCredentials(new RsaSecurityKey(_privateRsa), SecurityAlgorithms.RsaSha256);
+        
         var accessLifeTime = _configuration.GetValue("Jwt:AccessTokenLifetimeMinutes", AccessTokenLifetimeMinutes);
         
         var token = new JwtSecurityToken(
@@ -188,13 +251,14 @@ public class TokenService : ITokenService
             claims: claims,
             expires: DateTime.UtcNow.AddMinutes(accessLifeTime),
             signingCredentials: credentials);
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        
+        token.Header["kid"] = "main-key";
+        return token;
     }
 
     private static string GenerateRefreshToken() =>
         Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
-    
+
     private static string HashToken(string token)
     {
         using var sha = SHA256.Create();

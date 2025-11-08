@@ -15,6 +15,14 @@ public class TokenController(ITokenService tokenService) : ControllerBase
     public async Task<Jwt> CreateToken([FromBody] BaseLoginDto login,
         CancellationToken ct)
         => await tokenService.CreateJwtAsync(login, ct);
+    
+    /// <summary>
+    /// Creates a new JWT token for a machine client using client credentials.
+    /// </summary>
+    [HttpPost("client_credentials")]
+    public async Task<Jwt> CreateMachineToken([FromBody] ClientCredentialsDto clientCredentials,
+        CancellationToken ct)
+        => await tokenService.CreateMachineClientJwtAsync(clientCredentials, ct);
 
     /// <summary>
     /// Refreshes an existing JWT token using a valid refresh token.

@@ -24,8 +24,7 @@ internal static class ServiceCollectionExtensions
                 options.Audience = audience;
                 options.RequireHttpsMetadata = false; //on prod turns true
             });
-            
-
+        
         return services;
     }
     
@@ -40,7 +39,7 @@ internal static class ServiceCollectionExtensions
         
         return services.AddDbContext<ApplicationDbContext>(options =>
         {
-            options.UseNpgsql(connectionString, builder => builder.MigrationsAssembly(typeof(ApplicationDbContext).Assembly.FullName));
+            options.UseNpgsql(connectionString, builder => builder.MigrationsAssembly(typeof(Program).Assembly.FullName));
             
             options.UseLazyLoadingProxies();
         });

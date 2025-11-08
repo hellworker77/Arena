@@ -1,6 +1,6 @@
-using Domain.Entities.Relations;
+using Domain.Entities.Abstract;
 
-namespace Domain.Entities.Abstract;
+namespace Domain.Entities.Identity.Abstract;
 
 public abstract class BaseRole<TUserRole> : EventInfEntity
 {

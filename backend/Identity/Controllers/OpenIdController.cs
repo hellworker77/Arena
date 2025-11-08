@@ -29,6 +29,6 @@ public class OpenIdController(ITokenService tokenService): ControllerBase
     /// JWKS endpoint to retrieve the public keys for token validation.
     /// </summary>
     [HttpGet("jwks.json")]
-    public async Task<Jwks> GetJwks(CancellationToken ct)
-        => await tokenService.GetJwksAsync(ct);
+    public async Task<Jwks> GetJwks()
+        => await tokenService.GetJwksAsync();
 }

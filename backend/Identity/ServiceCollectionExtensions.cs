@@ -38,6 +38,7 @@ internal static class ServiceCollectionExtensions
             .AddScoped<IUserManager, UserManager>()
             .AddScoped<IRoleManager, RoleManager>()
             .AddScoped<IUserRoleManager, UserRoleManager>()
+            .AddScoped<IMachineClientRepository, MachineClientRepository>()
             .AddScoped<IJwtTokenRepository, JwtTokenRepository>();
     
     internal static IServiceCollection AddServices(this IServiceCollection services)

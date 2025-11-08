@@ -1,4 +1,6 @@
-namespace Domain.Entities.Abstract.Relations;
+using Domain.Entities.Abstract;
+
+namespace Domain.Entities.Identity.Abstract.Relations;
 
 public abstract class BaseUserRole<TUser, TRole> : BaseEntity
 {

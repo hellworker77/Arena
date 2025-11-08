@@ -19,7 +19,9 @@ public abstract class IdentityDbContext<TContext, TUser, TRole, TUserRole>(DbCon
     public DbSet<TUserRole> UserRoles => Set<TUserRole>();
 
     public DbSet<JwtToken> Tokens => Set<JwtToken>();
-
+    
+    public DbSet<MachineClient> MachineClients => Set<MachineClient>();
+    
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -65,8 +67,12 @@ public abstract class IdentityDbContext<TContext, TUser, TRole, TUserRole>(DbCon
             entity.HasOne(t => t.User)
                 .WithMany(u => u.Tokens)
                 .HasForeignKey(t => t.UserId)
-                .OnDelete(DeleteBehavior.Cascade)
-                .IsRequired();
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(t => t.MachineClient)
+                .WithMany(m => m.Tokens)
+                .HasForeignKey(t => t.MachineClientId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }
