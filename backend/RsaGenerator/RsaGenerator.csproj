@@ -9,4 +9,8 @@
         <InvariantGlobalization>true</InvariantGlobalization>
     </PropertyGroup>
 
+    <ItemGroup>
+      <PackageReference Include="Ocelot" Version="24.0.1" />
+    </ItemGroup>
+
 </Project>

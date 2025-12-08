@@ -21,4 +21,10 @@ public class TestController: ControllerBase
     {
         return 5;
     }
+
+    [HttpGet("key")]
+    public string GetFromCache(string key)
+    {
+        return "Hexadecimal";
+    }
 }

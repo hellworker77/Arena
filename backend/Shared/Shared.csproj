@@ -10,4 +10,9 @@
       <Folder Include="Paginated\Interfaces\" />
     </ItemGroup>
 
+    <ItemGroup>
+      <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.0" />
+      <PackageReference Include="Ocelot" Version="24.0.1" />
+    </ItemGroup>
+
 </Project>

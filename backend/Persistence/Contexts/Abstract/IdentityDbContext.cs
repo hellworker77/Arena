@@ -1,6 +1,6 @@
-using Domain.Entities;
-using Domain.Entities.Abstract;
-using Domain.Entities.Abstract.Relations;
+using Domain.Entities.Identity;
+using Domain.Entities.Identity.Abstract;
+using Domain.Entities.Identity.Abstract.Relations;
 using Microsoft.EntityFrameworkCore;
 
 namespace Persistence.Contexts.Abstract;
