@@ -2,8 +2,8 @@ import {Page} from "../../tamplates/page/page.tsx";
 import {useEffect, useRef} from "react";
 import Phaser from "phaser";
 import {gameOptions} from "../../tamplates/game/options/gameOptions.ts";
-import {PreloadAssets} from "../../tamplates/game/scenes/preloadAssets.ts";
-import {PlayGame} from "../../tamplates/game/scenes/playGame.ts";
+import {Boot} from "../../tamplates/game/scenes/boot.ts";
+import {Play} from "../../tamplates/game/scenes/play.ts";
 
 export const Arena = () => {
 
@@ -23,18 +23,20 @@ export const Arena = () => {
         }
 
         const configObject: Phaser.Types.Core.GameConfig = {
-            type: Phaser.WEBGL,
+            type: Phaser.CANVAS,
             backgroundColor: gameOptions.gameBackgroundColor,
+
+            render: {
+                pixelArt: true,
+                antialias: false
+            },
+
             scale: scaleObject,
-            scene: [
-                PreloadAssets,
-                PlayGame
-            ],
+
+            scene: [Boot, Play],
             physics: {
                 default: "arcade",
-                arcade: {
-                    debug: false
-                }
+                arcade: {debug: false}
             }
         };
 

@@ -1,16 +1,23 @@
 import type {BaseInGameProperties} from "./baseInGamePropertiesList .ts";
 import {Rarity} from "./rarity.ts";
+import {ItemBase} from "../../../assets/itemsStore/itemBase.ts";
 
-export interface Item extends BaseInGameProperties {
+export interface BaseItem extends BaseInGameProperties {
+    itemID: ItemBase
     name: string;
     rarity: Rarity;
 }
 
-export const mightySwordOfAzeroth: Item = {
+export const mightySwordOfAzeroth: BaseItem = {
+    itemID: ItemBase.SHORT_SWORD,
     name: "Mighty Sword of Azeroth",
     rarity: Rarity.EPIC,
-    minimumDamage: 15,
-    maximumDamage: 25,
+    twoHanded: true,
+    twoHandedMinimumDamage: 34,
+    twoHandedMaximumDamage: 59,
+    oneHandedMinimumDamage: 14,
+    oneHandedMaximumDamage: 25,
+
     defense: 10,
     additionalStrength: 5,
     lifeSteal: 2,

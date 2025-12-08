@@ -1,9 +1,31 @@
+enum BaseInGameUseEvent {
+    OnAttack,
+    OnStriking,
+    OnStruck,
+    OnLevelUp,
+    whenEquipped,
+    OnCasting
+}
+
+type UseEvent = {
+    event: BaseInGameUseEvent;
+    skillID: number
+    level: number
+    chance: number
+}
+
 /** Идиоматичный TS-интерфейс с camelCase именами */
 export interface BaseInGameProperties {
     // base stats
     defense: number;
-    minimumDamage: number;
-    maximumDamage: number;
+
+    twoHanded: boolean;
+    twoHandedMinimumDamage: number;
+    twoHandedMaximumDamage: number;
+    oneHandedMinimumDamage: number;
+    oneHandedMaximumDamage: number;
+
+
     attackSpeed: number;
     requiredLevel: number;
     attackRating: number;
@@ -60,4 +82,6 @@ export interface BaseInGameProperties {
     coldSkillDamage: number;
     lightningSkillDamage: number;
     poisonSkillDamage: number;
+
+    useEvents?: UseEvent[];
 }

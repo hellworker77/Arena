@@ -1,4 +1,4 @@
-export enum ItemBases {
+export enum ItemBase {
     /// NORMAL SWORDS
     SHORT_SWORD = "short_sword",
     SCIMITAR = "scimitar",
