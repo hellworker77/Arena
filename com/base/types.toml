@@ -1,0 +1,6 @@
+[[useEvent]]
+chance="float"
+action="com.base.combatActions"
+level="int32"
+skill="com.base.skills"
+trigger="com.base.triggers"
