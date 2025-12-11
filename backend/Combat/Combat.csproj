@@ -14,4 +14,8 @@
       <ProjectReference Include="..\Persistence\Persistence.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <PackageReference Include="Ocelot" Version="24.0.1" />
+    </ItemGroup>
+
 </Project>

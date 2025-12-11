@@ -25,7 +25,36 @@ namespace Web.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
-            modelBuilder.Entity("Domain.Entities.ApplicationRole", b =>
+            modelBuilder.Entity("Domain.Entities.Character", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ApplicationUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Class")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("LastModifiedDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApplicationUserId");
+
+                    b.ToTable("Character");
+                });
+
+            modelBuilder.Entity("Domain.Entities.Identity.ApplicationRole", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -50,7 +79,7 @@ namespace Web.Migrations
                     b.ToTable("Roles");
                 });
 
-            modelBuilder.Entity("Domain.Entities.ApplicationUser", b =>
+            modelBuilder.Entity("Domain.Entities.Identity.ApplicationUser", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -89,7 +118,7 @@ namespace Web.Migrations
                     b.ToTable("Users");
                 });
 
-            modelBuilder.Entity("Domain.Entities.JwtToken", b =>
+            modelBuilder.Entity("Domain.Entities.Identity.JwtToken", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -133,7 +162,7 @@ namespace Web.Migrations
                     b.ToTable("Tokens");
                 });
 
-            modelBuilder.Entity("Domain.Entities.MachineClient", b =>
+            modelBuilder.Entity("Domain.Entities.Identity.MachineClient", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -161,7 +190,7 @@ namespace Web.Migrations
                     b.ToTable("MachineClients");
                 });
 
-            modelBuilder.Entity("Domain.Entities.Relations.ApplicationUserRole", b =>
+            modelBuilder.Entity("Domain.Entities.Identity.Relations.ApplicationUserRole", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -182,14 +211,38 @@ namespace Web.Migrations
                     b.ToTable("UserRoles");
                 });
 
-            modelBuilder.Entity("Domain.Entities.JwtToken", b =>
+            modelBuilder.Entity("Domain.Entities.Inventory", b =>
                 {
-                    b.HasOne("Domain.Entities.MachineClient", "MachineClient")
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CharacterId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CharacterId")
+                        .IsUnique();
+
+                    b.ToTable("Inventory");
+                });
+
+            modelBuilder.Entity("Domain.Entities.Character", b =>
+                {
+                    b.HasOne("Domain.Entities.Identity.ApplicationUser", null)
+                        .WithMany("Characters")
+                        .HasForeignKey("ApplicationUserId");
+                });
+
+            modelBuilder.Entity("Domain.Entities.Identity.JwtToken", b =>
+                {
+                    b.HasOne("Domain.Entities.Identity.MachineClient", "MachineClient")
                         .WithMany("Tokens")
                         .HasForeignKey("MachineClientId")
                         .OnDelete(DeleteBehavior.Cascade);
 
-                    b.HasOne("Domain.Entities.ApplicationUser", "User")
+                    b.HasOne("Domain.Entities.Identity.ApplicationUser", "User")
                         .WithMany("Tokens")
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade);
@@ -199,15 +252,15 @@ namespace Web.Migrations
                     b.Navigation("User");
                 });
 
-            modelBuilder.Entity("Domain.Entities.Relations.ApplicationUserRole", b =>
+            modelBuilder.Entity("Domain.Entities.Identity.Relations.ApplicationUserRole", b =>
                 {
-                    b.HasOne("Domain.Entities.ApplicationRole", "Role")
+                    b.HasOne("Domain.Entities.Identity.ApplicationRole", "Role")
                         .WithMany("UserRoles")
                         .HasForeignKey("RoleId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("Domain.Entities.ApplicationUser", "User")
+                    b.HasOne("Domain.Entities.Identity.ApplicationUser", "User")
                         .WithMany("UserRoles")
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
@@ -218,19 +271,38 @@ namespace Web.Migrations
                     b.Navigation("User");
                 });
 
-            modelBuilder.Entity("Domain.Entities.ApplicationRole", b =>
+            modelBuilder.Entity("Domain.Entities.Inventory", b =>
+                {
+                    b.HasOne("Domain.Entities.Character", "Character")
+                        .WithOne("Inventory")
+                        .HasForeignKey("Domain.Entities.Inventory", "CharacterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Character");
+                });
+
+            modelBuilder.Entity("Domain.Entities.Character", b =>
+                {
+                    b.Navigation("Inventory")
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Domain.Entities.Identity.ApplicationRole", b =>
                 {
                     b.Navigation("UserRoles");
                 });
 
-            modelBuilder.Entity("Domain.Entities.ApplicationUser", b =>
+            modelBuilder.Entity("Domain.Entities.Identity.ApplicationUser", b =>
                 {
+                    b.Navigation("Characters");
+
                     b.Navigation("Tokens");
 
                     b.Navigation("UserRoles");
                 });
 
-            modelBuilder.Entity("Domain.Entities.MachineClient", b =>
+            modelBuilder.Entity("Domain.Entities.Identity.MachineClient", b =>
                 {
                     b.Navigation("Tokens");
                 });

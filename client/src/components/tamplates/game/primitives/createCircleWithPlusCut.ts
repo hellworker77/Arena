@@ -1,3 +1,4 @@
+/*
 export function createCircleWithPlusCut(
     scene: Phaser.Scene,
     key: string,
@@ -54,3 +55,4 @@ export function createCircleWithPlusCut(
     tctx.drawImage(canvas, 0, 0);
     texture.refresh();
 }
+*/

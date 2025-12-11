@@ -1,3 +1,3 @@
 export const gameOptions = {
-    gameBackgroundColor     : 0x222,
+    gameBackgroundColor     : 0x222222,
 }

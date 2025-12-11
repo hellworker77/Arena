@@ -17,3 +17,5 @@ r-services/domain/target
 r-services/infrastructure/target
 r-services/persistence/target
 r-services/target
+itemsParser
+arreatSummitParser/.idea

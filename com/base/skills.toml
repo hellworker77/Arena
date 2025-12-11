@@ -1,0 +1,102 @@
+[[skill]]
+id = "com.base.skills.heroicStrike"
+
+[[skill]]
+id = "com.base.skills.cleave"
+
+[[skill]]
+id = "com.base.skills.execute"
+
+[[skill]]
+id = "com.base.skills.whirlwind"
+
+
+[[skill]]
+id = "com.base.skills.howl"
+
+[[skill]]
+id = "com.base.skills.shout"
+
+[[skill]]
+id = "com.base.skills.battleOrder"
+
+[[skill]]
+id = "com.base.skills.battleCommand"
+
+
+[[skill]]
+id = "com.base.skills.fireBolt"
+
+[[skill]]
+id = "com.base.skills.fireBall"
+
+[[skill]]
+id = "com.base.skills.meteor"
+
+[[skill]]
+id = "com.base.skills.fireBlast"
+
+
+[[skill]]
+id = "com.base.skills.frostBolt"
+
+[[skill]]
+id = "com.base.skills.glacialSpike"
+
+[[skill]]
+id = "com.base.skills.blizzard"
+
+[[skill]]
+id = "com.base.skills.frozenOrb"
+
+
+[[skill]]
+id = "com.base.skills.chargedBolt"
+
+[[skill]]
+id = "com.base.skills.lightning"
+
+[[skill]]
+id = "com.base.skills.chainLightning"
+
+[[skill]]
+id = "com.base.skills.thunderStorm"
+
+
+[[skill]]
+id = "com.base.skills.magicArrow"
+
+[[skill]]
+id = "com.base.skills.multiShot"
+
+[[skill]]
+id = "com.base.skills.guidedArrow"
+
+[[skill]]
+id = "com.base.skills.strafe"
+
+
+[[skill]]
+id = "com.base.skills.jab"
+
+[[skill]]
+id = "com.base.skills.lightningBolt"
+
+[[skill]]
+id = "com.base.skills.fend"
+
+[[skill]]
+id = "com.base.skills.lightningFury"
+
+
+[[skill]]
+id = "com.base.skills.jab"
+
+[[skill]]
+id = "com.base.skills.lightningBolt"
+
+[[skill]]
+id = "com.base.skills.fend"
+
+[[skill]]
+id = "com.base.skills.lightningFury"

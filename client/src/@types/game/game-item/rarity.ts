@@ -1,4 +1,5 @@
 export enum Rarity {
+    "CRAP"= "crap",
     COMMON = "common",
     MAGIC = "magic",
     RARE = "rare",

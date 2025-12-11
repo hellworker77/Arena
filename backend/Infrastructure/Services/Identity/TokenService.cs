@@ -5,7 +5,7 @@ using System.Text;
 using Application.Contracts.Data.Identity;
 using Application.Repositories.Identity;
 using Application.Services.Identity;
-using Domain.Entities;
+using Domain.Entities.Identity;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using Persistence.Contexts;

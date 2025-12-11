@@ -1,6 +1,6 @@
 using Application.DatabaseFakers;
-using Domain.Entities;
-using Domain.Entities.Relations;
+using Domain.Entities.Identity;
+using Domain.Entities.Identity.Relations;
 using Persistence.Contexts;
 
 namespace Persistence.DatabaseFakers;

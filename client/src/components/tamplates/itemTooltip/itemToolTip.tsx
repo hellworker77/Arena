@@ -1,8 +1,8 @@
-import type {Item} from "../../../@types/game/game-item/item.ts";
+import type {BaseItem} from "../../../@types/game/game-item/baseItem.ts";
 import {useTranslation} from "react-i18next";
 
 interface ItemToolTipProps {
-    item: Item;
+    item: BaseItem;
 }
 
 type Property = {

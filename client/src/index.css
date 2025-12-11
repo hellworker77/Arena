@@ -1,5 +1,24 @@
 @import "tailwindcss";
 
+@font-face {
+    font-family: "Exocet";
+    src: url("/fonts/exocet-light.ttf") format("truetype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@theme {
+    --font-exocet: "Exocet", sans-serif;
+}
+
+@layer utilities {
+    .exocet-caps {
+        text-transform: uppercase;
+        font-size: calc(1em + 5px);
+    }
+}
+
 body{
     margin: 0;
     padding: 0;

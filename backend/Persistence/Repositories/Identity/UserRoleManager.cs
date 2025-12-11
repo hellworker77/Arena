@@ -1,5 +1,5 @@
 using Application.Repositories.Identity;
-using Domain.Entities.Relations;
+using Domain.Entities.Identity.Relations;
 using Microsoft.EntityFrameworkCore;
 using Persistence.Contexts;
 

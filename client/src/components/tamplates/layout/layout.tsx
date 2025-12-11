@@ -13,7 +13,6 @@ export const Layout = () => {
             backgroundRepeat: 'no-repeat',
         }}
              className="flex flex-col min-h-screen bg-transparent text-gray-200 select-none">
-
             <Nav/>
             <div className="flex flex-1">
                 <Side/>
