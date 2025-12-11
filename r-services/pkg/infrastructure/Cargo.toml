@@ -1,0 +1,11 @@
+[package]
+name = "infrastructure"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.89"
+application = { path = "../application" }
+anyhow = "1.0.100"
+persistence = { path = "../persistence" }
+tokio = { version = "1", features = ["full"] }
