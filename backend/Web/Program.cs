@@ -19,15 +19,6 @@ builder.Services.AddControllers();
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-{
-    var bootstrapper = scope.ServiceProvider.GetRequiredService<IApplicationDbContextBootstrapper>();
-    await bootstrapper.BootstrapAsync();
-    
-    var initializer = scope.ServiceProvider.GetRequiredService<IDbInitializer>();
-    await initializer.InitializeAsync();
-}
-
 app.UseAuthentication();
 app.UseAuthorization();
 

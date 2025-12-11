@@ -1,0 +1,49 @@
+{
+  "Routes": [
+    {
+      "DownstreamPathTemplate": "/.well-known/{everything}",
+      "DownstreamHostAndPorts": [
+        { "Host": "localhost", "Port": 5002 }
+      ],
+      "DownstreamScheme": "http",
+      "UpstreamPathTemplate": "/.well-known/{everything}",
+      "UpstreamHttpMethod": [ "GET" ]
+    },
+    {
+      "DownstreamPathTemplate": "/api/token",
+      "DownstreamHostAndPorts": [
+        { "Host": "localhost", "Port": 5002 }
+      ],
+      "DownstreamScheme": "http",
+      "UpstreamPathTemplate": "/api/v1/token",
+      "UpstreamHttpMethod": [ "POST" ]
+    },
+    {
+      "DownstreamPathTemplate": "/api/token/client_credentials",
+      "DownstreamHostAndPorts": [
+        { "Host": "localhost", "Port": 5002 }
+      ],
+      "DownstreamScheme": "http",
+      "UpstreamPathTemplate": "/api/v1/token/client_credentials",
+      "UpstreamHttpMethod": [ "POST" ]
+    },
+    {
+      "DownstreamPathTemplate": "/api/token/refresh",
+      "DownstreamHostAndPorts": [
+        { "Host": "localhost", "Port": 5002 }
+      ],
+      "DownstreamScheme": "http",
+      "UpstreamPathTemplate": "/api/v1/token/refresh",
+      "UpstreamHttpMethod": [ "PUT" ]
+    },
+    {
+      "DownstreamPathTemplate": "/api/token/revoke",
+      "DownstreamHostAndPorts": [
+        { "Host": "localhost", "Port": 5002 }
+      ],
+      "DownstreamScheme": "http",
+      "UpstreamPathTemplate": "/api/v1/token/revoke",
+      "UpstreamHttpMethod": [ "DELETE" ]
+    }
+  ]
+}

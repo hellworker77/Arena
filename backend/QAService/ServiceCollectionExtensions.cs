@@ -1,14 +1,7 @@
-using Application.DatabaseBootstrappers;
-using Application.DatabaseFakers;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.EntityFrameworkCore;
-using Ocelot.DependencyInjection;
-using Persistence.Contexts;
-using Persistence.DatabaseBootstrappers;
-using Persistence.DatabaseFakers;
 using Shared.Settings;
 
-namespace ApiGateway;
+namespace QAService;
 
 internal static class ServiceCollectionExtensions
 {
@@ -61,38 +54,6 @@ internal static class ServiceCollectionExtensions
             });
 
             return services;
-        }
-
-        internal IServiceCollection AddApiGateway(ConfigurationManager configuration,
-            string rootPath)
-        {
-            var folder = Path.Combine(rootPath, "Ocelot");
-
-            foreach (var file in Directory.GetFiles(folder, "*.json"))
-            {
-                configuration.AddJsonFile(file, optional: false, reloadOnChange: true);
-            }
-
-            services.AddOcelot(configuration);
-
-            return services;
-        }
-
-        internal void AddDbContexts(IConfiguration configuration)
-        {
-            var connectionString = configuration.GetConnectionString("masterDb")
-                                   ?? throw new InvalidOperationException("Connection string 'masterDb' not found.");
-
-            services.AddScoped<IApplicationDbContextBootstrapper, ApplicationDbContextBootstrapper>();
-            services.AddScoped<IDbInitializer, DbInitializer>();
-
-            services.AddDbContext<ApplicationDbContext>(options =>
-            {
-                options.UseNpgsql(connectionString,
-                    builder => builder.MigrationsAssembly(typeof(Program).Assembly.FullName));
-
-                options.UseLazyLoadingProxies();
-            });
         }
     }
 

@@ -1,61 +1,61 @@
 using Application.Contracts.Data.Identity;
-using Application.DatabaseBootstrappers;
 using Application.Repositories.Identity;
 using Application.Services.Identity;
 using Infrastructure.Services.Identity;
 using Microsoft.EntityFrameworkCore;
 using Persistence.Contexts;
-using Persistence.DatabaseBootstrappers;
 using Persistence.Repositories.Identity;
 
 namespace Identity;
 
 internal static class ServiceCollectionExtensions
 {
-    internal static IServiceCollection AddRsaPem(this IServiceCollection services, string basePath = "keys")
+    extension(IServiceCollection services)
     {
-        var privateKeyPath = Path.Combine(basePath, "private.pem");
-        var publicKeyPath = Path.Combine(basePath, "public.pem");
-
-        if (!File.Exists(privateKeyPath) || !File.Exists(publicKeyPath))
-            throw new FileNotFoundException($"RSA key files not found in path: {Path.GetFullPath(basePath)}");
-
-        var privatePem = File.ReadAllText(privateKeyPath);
-        var publicPem = File.ReadAllText(publicKeyPath);
-
-        var rsaPem = new RsaPem
+        internal IServiceCollection AddRsaPem(string basePath = "keys")
         {
-            privatePem = privatePem,
-            publicPem = publicPem
-        };
+            var privateKeyPath = Path.Combine(basePath, "private.pem");
+            var publicKeyPath = Path.Combine(basePath, "public.pem");
 
-        services.AddSingleton(rsaPem);
-        return services;
-    }
+            if (!File.Exists(privateKeyPath) || !File.Exists(publicKeyPath))
+                throw new FileNotFoundException($"RSA key files not found in path: {Path.GetFullPath(basePath)}");
 
-    internal static IServiceCollection AddRepositories(this IServiceCollection services)
-        => services
-            .AddScoped<IUserManager, UserManager>()
-            .AddScoped<IRoleManager, RoleManager>()
-            .AddScoped<IUserRoleManager, UserRoleManager>()
-            .AddScoped<IMachineClientRepository, MachineClientRepository>()
-            .AddScoped<IJwtTokenRepository, JwtTokenRepository>();
-    
-    internal static IServiceCollection AddServices(this IServiceCollection services)
-        => services
-            .AddScoped<ITokenService, TokenService>();
+            var privatePem = File.ReadAllText(privateKeyPath);
+            var publicPem = File.ReadAllText(publicKeyPath);
 
-    internal static IServiceCollection AddDbContexts(this IServiceCollection services,
-        IConfiguration configuration)
-    {
-        var connectionString = configuration.GetConnectionString("masterDb")
-                               ?? throw new InvalidOperationException("Connection string 'masterDb' not found.");
+            var rsaPem = new RsaPem
+            {
+                privatePem = privatePem,
+                publicPem = publicPem
+            };
 
-        return services.AddDbContext<ApplicationDbContext>(options =>
+            services.AddSingleton(rsaPem);
+            return services;
+        }
+
+        internal IServiceCollection AddRepositories()
+            => services
+                .AddScoped<IUserManager, UserManager>()
+                .AddScoped<IRoleManager, RoleManager>()
+                .AddScoped<IUserRoleManager, UserRoleManager>()
+                .AddScoped<IMachineClientRepository, MachineClientRepository>()
+                .AddScoped<IJwtTokenRepository, JwtTokenRepository>();
+
+        internal IServiceCollection AddServices()
+            => services
+                .AddScoped<ITokenService, TokenService>();
+
+        internal IServiceCollection AddDbContexts(IConfiguration configuration)
         {
-            options.UseNpgsql(connectionString, builder => builder.MigrationsAssembly("Web"));
+            var connectionString = configuration.GetConnectionString("masterDb")
+                                   ?? throw new InvalidOperationException("Connection string 'masterDb' not found.");
+
+            return services.AddDbContext<ApplicationDbContext>(options =>
+            {
+                options.UseNpgsql(connectionString, builder => builder.MigrationsAssembly("Web"));
             
-            options.UseLazyLoadingProxies();
-        });
+                options.UseLazyLoadingProxies();
+            });
+        }
     }
 }

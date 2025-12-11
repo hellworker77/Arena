@@ -1,0 +1,26 @@
+{
+  "Routes": [
+    {
+      "DownstreamPathTemplate": "/api/test",
+      "DownstreamHostAndPorts": [
+        { "Host": "localhost", "Port": 5001 }
+      ],
+      "DownstreamScheme": "http",
+      "UpstreamPathTemplate": "/api/v1/test",
+      "UpstreamHttpMethod": [ "GET" ],
+      "AuthenticationOptions": {
+        "AuthenticationProviderKey": "JwtBearer",
+        "AllowedScopes": []
+      }
+    },
+    {
+      "DownstreamPathTemplate": "/api/test/key",
+      "DownstreamHostAndPorts": [
+        { "Host": "localhost", "Port": 5001 }
+      ],
+      "DownstreamScheme": "http",
+      "UpstreamPathTemplate": "/api/v1/test/key",
+      "UpstreamHttpMethod": [ "GET" ]
+    }
+  ]
+}

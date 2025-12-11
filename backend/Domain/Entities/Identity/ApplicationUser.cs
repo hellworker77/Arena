@@ -5,5 +5,5 @@ namespace Domain.Entities.Identity;
 
 public class ApplicationUser : BaseUser<ApplicationUserRole>
 {
-    public virtual List<Character> Characters { get; set; }
+    public virtual List<SavedCharacter> Characters { get; set; }
 }

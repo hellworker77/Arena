@@ -9,23 +9,32 @@ public class DbInitializer(ApplicationDbContext dbContext) : IDbInitializer
 {
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await dbContext.Database.EnsureDeletedAsync(cancellationToken);
-        await dbContext.Database.EnsureCreatedAsync(cancellationToken);
-        
-        dbContext.Users.AddRange(FakeData.Users);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        
-        dbContext.Roles.AddRange(FakeData.Roles);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        
-        dbContext.UserRoles.AddRange(FakeData.userRoles);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        
-        dbContext.Tokens.AddRange(FakeData.jwtTokens);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        if (!dbContext.Users.Any())
+        {
+            dbContext.Users.AddRange(FakeData.Users);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        if (!dbContext.Roles.Any())
+        {
+            dbContext.Roles.AddRange(FakeData.Roles);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        if (!dbContext.UserRoles.Any())
+        {
+            dbContext.UserRoles.AddRange(FakeData.UserRoles);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        if (!dbContext.Tokens.Any())
+        {
+            dbContext.Tokens.AddRange(FakeData.JwtTokens);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
     }
 
-    private record FakeData
+    private static class FakeData
     {
         
         public static readonly IEnumerable<ApplicationUser> Users = new List<ApplicationUser>()
@@ -48,7 +57,7 @@ public class DbInitializer(ApplicationDbContext dbContext) : IDbInitializer
             }
         };
         
-        public static readonly IEnumerable<ApplicationUserRole> userRoles = new List<ApplicationUserRole>()
+        public static readonly IEnumerable<ApplicationUserRole> UserRoles = new List<ApplicationUserRole>()
         {
             new ()
             {
@@ -57,6 +66,6 @@ public class DbInitializer(ApplicationDbContext dbContext) : IDbInitializer
             }
         };
         
-        public static readonly IEnumerable<JwtToken> jwtTokens = new List<JwtToken>();
+        public static readonly IEnumerable<JwtToken> JwtTokens = new List<JwtToken>();
     }
 }
