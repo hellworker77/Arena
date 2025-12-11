@@ -1,30 +1,26 @@
 import {useCallback, useState} from "react";
 import {api} from "@/api/apiClient.ts";
 
-type Method = "post" | "put" | "delete";
-
-export function useMutation<T = any, B = any>(method: Method, url: string) {
+export function useApi<T = any>() {
     const [data, setData] = useState<T | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const mutate = useCallback(
-        async (body?: B) => {
-            setLoading(true);
-            setError(null);
-            try {
-                const { data } = await api[method]<T>(url, body);
-                setData(data);
-                return data;
-            } catch (err: any) {
-                setError(err?.response?.data?.message || "Unknown error");
-                throw err;
-            } finally {
-                setLoading(false);
-            }
-        },
-        [method, url]
-    );
+    const request = useCallback(async (url: string, params?: any) => {
+        setLoading(true);
+        setError(null);
 
-    return { data, error, loading, mutate };
+        try {
+            const { data } = await api.get<T>(url, { params });
+            setData(data);
+            return data;
+        } catch (e: any) {
+            setError(e?.response?.data?.message || "Unknown error");
+            throw e;
+        } finally {
+            setLoading(false);
+        }
+    }, [])
+
+    return { data, error, loading, request };
 }
