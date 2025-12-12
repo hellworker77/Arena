@@ -1,11 +1,11 @@
 use crate::rest::endpoints::{
-    delete_handler, download_handler, exists_handler, list_handler, metadata_handler,
-    upload_handler,
+    delete_handler, download_handler, exists_handler, head_info_handler, list_handler,
+    metadata_handler, upload_handler,
 };
 use crate::types::app_state::AppState;
-use axum::http::StatusCode;
-use axum::routing::{delete, get, post};
 use axum::Router;
+use axum::http::StatusCode;
+use axum::routing::{delete, get, head, post};
 use infrastructure::factory::service_factory::ServiceFactory;
 
 pub async fn build_app() -> Router {
@@ -16,6 +16,7 @@ pub async fn build_app() -> Router {
         .route("/upload/{key}", post(upload_handler))
         .route("/download/{key}", get(download_handler))
         .route("/metadata/{key}", get(metadata_handler))
+        .route("/blob/{key}/info", head(head_info_handler))
         .route("/exists/{key}", get(exists_handler))
         .route("/list", get(list_handler))
         .route("/delete/{key}", delete(delete_handler))

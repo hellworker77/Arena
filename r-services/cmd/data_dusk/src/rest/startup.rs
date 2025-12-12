@@ -3,9 +3,12 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use crate::rest::build_app::build_app;
 use axum::serve;
+use dotenv::dotenv;
 
 pub async fn startup() {
     let app = build_app().await;
+
+    dotenv().ok();
 
     let ip = env::var("HOST").unwrap_or("0.0.0.0".into());
     let port: u16 = env::var("PORT")

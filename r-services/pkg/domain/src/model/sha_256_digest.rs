@@ -1,0 +1,1 @@
+pub struct Sha256Digest([u8; 32]);

@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::fs::{File, create_dir_all};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-
+use mime_guess::MimeGuess;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Repository for managing PAK files and their entries.
@@ -60,7 +61,7 @@ impl PakRepository {
         f.read_exact(&mut count_b)?;
         let count = u32::from_le_bytes(count_b);
 
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(count as usize);
 
         for _ in 0..count {
             let mut len_b = [0u8; 2];
@@ -105,27 +106,29 @@ impl PakRepository {
             });
         }
 
-        // Load metadata length (last 8 bytes)
+        // metadata length (last 8 bytes)
         let file_len = f.seek(SeekFrom::End(0))?;
         f.seek(SeekFrom::End(-8))?;
         let mut ml = [0u8; 8];
         f.read_exact(&mut ml)?;
         let meta_len = u64::from_le_bytes(ml);
 
+        if meta_len + 8 > file_len {
+            anyhow::bail!("invalid metadata length");
+        }
+
         let meta_start = file_len - 8 - meta_len;
         f.seek(SeekFrom::Start(meta_start))?;
-
         let mut meta_buf = vec![0u8; meta_len as usize];
         f.read_exact(&mut meta_buf)?;
-
         let metadata: Vec<BlobMetadata> = serde_json::from_slice(&meta_buf)?;
 
-        //blob data is between index_end and meta_start
+        // blob data is everything between index and metadata
         let index_end = 4
             + 4
             + entries
                 .iter()
-                .map(|e| 2 + e.key.len() + 4 + 8 + 8 + 12 + 16)
+                .map(|e| 2 + e.key.len() + 4 + 8 + 8 + 8 + 12 + 16) // corrected: size_compressed = u64
                 .sum::<usize>() as u64;
 
         f.seek(SeekFrom::Start(index_end))?;
@@ -144,13 +147,14 @@ impl PakRepository {
         metadata: &[BlobMetadata],
     ) -> Result<()> {
         let tmp = path.with_extension("tmp");
+        if let Some(parent) = tmp.parent() {
+            create_dir_all(parent)?;
+        }
 
         let mut out = File::create(&tmp)?;
-
         out.write_all(b"PAK1")?;
         out.write_all(&(entries.len() as u32).to_le_bytes())?;
 
-        //index
         for e in entries {
             let kb = e.key.as_bytes();
             out.write_all(&(kb.len() as u16).to_le_bytes())?;
@@ -163,10 +167,8 @@ impl PakRepository {
             out.write_all(e.blob_id.as_bytes())?;
         }
 
-        //blob data
         out.write_all(blob_data)?;
 
-        //metadata json
         let meta_json = serde_json::to_vec_pretty(metadata)?;
         out.write_all(&meta_json)?;
         out.write_all(&(meta_json.len() as u64).to_le_bytes())?;
@@ -193,6 +195,8 @@ impl PakRepository {
             encryption_nonce: e.nonce,
             compression: CompressionKind::Zlib,
             encryption: EncryptionKind::Aes256Gcm,
+            content_type: None,
+            content_checksum_sha256: None,
         }
     }
 }
@@ -201,19 +205,27 @@ impl PakRepository {
 impl BlobRepository for PakRepository {
     async fn put(&self, key: &str, content: &[u8]) -> Result<()> {
         let path = self.file_path(key);
-
         let (mut entries, mut blob_data, _old_meta) = self.read_pak(&path)?;
 
-        let (cipher_buf, nonce, comp_len, enc_len) = self.codec.encode(content)?;
+        // Mime detection
+        let mime = MimeGuess::from_path(key)
+            .first()
+            .map(|m| m.essence_str().to_string());
+
+        // SHA256 hashing
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let hash = hex::encode(hasher.finalize());
+
+        let (cipher_buf, nonce, _comp_len, enc_len) = self.codec.encode(content)?;
 
         let version = entries.iter().map(|e| e.version).max().unwrap_or(0) + 1;
         let blob_id = Uuid::new_v4();
-
         let offset = blob_data.len() as u64;
 
-        blob_data.extend(cipher_buf);
+        blob_data.extend(&cipher_buf);
 
-        let entry = PakIndexEntry {
+        entries.push(PakIndexEntry {
             key: key.to_string(),
             version,
             offset,
@@ -221,15 +233,19 @@ impl BlobRepository for PakRepository {
             size_compressed: enc_len as u64,
             nonce,
             blob_id,
-        };
-
-        entries.push(entry);
+        });
 
         let metadata = entries
             .iter()
-            .map(|e| self.build_metadata(e))
+            .map(|e| {
+                let mut meta = self.build_metadata(e);
+                
+                meta.content_type = mime.clone();
+                meta.content_checksum_sha256 = Some(hash.clone());
+                
+                meta
+            })
             .collect::<Vec<_>>();
-
         self.write_pak(&path, &entries, &blob_data, &metadata)?;
 
         Ok(())
@@ -237,14 +253,12 @@ impl BlobRepository for PakRepository {
 
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
         let path = self.file_path(key);
-
-        let (entries, blob_data, _metadata) = self.read_pak(&path)?;
+        let (entries, blob_data, _meta) = self.read_pak(&path)?;
 
         let e = entries
             .iter()
             .max_by_key(|e| e.version)
             .ok_or_else(|| anyhow::anyhow!("Not found"))?;
-
         let slice = &blob_data[e.offset as usize..(e.offset + e.size_compressed) as usize];
         let plain = self.codec.decode(&e.nonce, slice)?;
 
@@ -253,18 +267,15 @@ impl BlobRepository for PakRepository {
 
     async fn get_metadata(&self, key: &str) -> Result<BlobMetadata> {
         let path = self.file_path(key);
-
         let (entries, _blob_data, metadata) = self.read_pak(&path)?;
         let e = entries
             .iter()
             .max_by_key(|e| e.version)
             .ok_or_else(|| anyhow::anyhow!("Not found"))?;
-
         let m = metadata
             .iter()
             .find(|m| m.version == e.version)
             .ok_or_else(|| anyhow::anyhow!("Metadata missing"))?;
-
         Ok(m.clone())
     }
 
@@ -278,26 +289,22 @@ impl BlobRepository for PakRepository {
 
     async fn list(&self, prefix: Option<&str>) -> Result<HashMap<String, BlobMetadata>> {
         let mut out = HashMap::new();
-
         for entry in std::fs::read_dir(&self.base_dir)? {
             let p = entry?.path();
             if p.extension().and_then(|x| x.to_str()) != Some("pak") {
                 continue;
             }
-
             let file_stem = p.file_stem().unwrap().to_string_lossy().to_string();
             if let Some(pref) = prefix {
                 if !file_stem.starts_with(pref) {
                     continue;
                 }
             }
-
             let (_entries, _data, meta) = self.read_pak(&p)?;
             if let Some(latest) = meta.iter().max_by_key(|m| m.version) {
                 out.insert(file_stem, latest.clone());
             }
         }
-
         Ok(out)
     }
 

@@ -10,7 +10,12 @@ pub fn get_config() -> (String, [u8; 32]) {
 
     let codec_key_bytes = codec_key_str.as_bytes();
 
-    assert_eq!(codec_key_bytes.len(), 32, "AES_KEY must be 32 bytes");
+    if codec_key_bytes.len() != 32 {
+        panic!(
+            "AES_KEY must be exactly 32 bytes, found {} bytes",
+            codec_key_bytes.len()
+        );
+    }
 
     let mut codec_key = [0u8; 32];
     codec_key.copy_from_slice(codec_key_bytes);
