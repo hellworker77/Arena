@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::models::blob_metadata::BlobMetadata;
+use domain::models::blob_metadata::BlobMetadata;
 
 /// English
 /// Service for interacting with a blob storage system.

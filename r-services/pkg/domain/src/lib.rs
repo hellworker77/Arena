@@ -1,3 +1,1 @@
-mod entities;
-mod events;
-mod model;
+pub mod models;

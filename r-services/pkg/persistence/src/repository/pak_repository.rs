@@ -1,21 +1,20 @@
 use crate::codec::zlib_aes_codec::ZlibAesCodec;
 use anyhow::Result;
 use application::codec::blob_codec::BlobCodec;
-use application::models::blob_metadata::BlobMetadata;
-use application::models::compression_kind::CompressionKind;
-use application::models::encryption_kind::EncryptionKind;
-use application::models::pak_index_entry::PakIndexEntry;
+use application::feature::builder_metadata_builder::BlobMetadataBuilder;
 use application::repository::blob_repository::BlobRepository;
-
 use async_trait::async_trait;
 use chrono::Utc;
-
-use std::collections::HashMap;
-use std::fs::{File, create_dir_all};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use domain::models::blob_metadata::BlobMetadata;
+use domain::models::compression_kind::CompressionKind;
+use domain::models::encryption_kind::EncryptionKind;
+use domain::models::pak_index_entry::PakIndexEntry;
 use mime_guess::MimeGuess;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs::{create_dir_all, File};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Repository for managing PAK files and their entries.
@@ -178,74 +177,83 @@ impl PakRepository {
 
         Ok(())
     }
-
-    fn build_metadata(&self, e: &PakIndexEntry) -> BlobMetadata {
-        let ts = Utc::now().timestamp();
-        BlobMetadata {
-            blob_id: e.blob_id,
-            version: e.version,
-            key: e.key.clone(),
-            blob_type: "Generic".into(),
-            created_at_unix: ts,
-            updated_at_unix: ts,
-            size_original: e.size_original,
-            size_compressed: e.size_compressed,
-            size_encrypted: e.size_compressed,
-            pak_offset: e.offset,
-            encryption_nonce: e.nonce,
-            compression: CompressionKind::Zlib,
-            encryption: EncryptionKind::Aes256Gcm,
-            content_type: None,
-            content_checksum_sha256: None,
-        }
-    }
 }
 
 #[async_trait]
 impl BlobRepository for PakRepository {
     async fn put(&self, key: &str, content: &[u8]) -> Result<()> {
         let path = self.file_path(key);
-        let (mut entries, mut blob_data, _old_meta) = self.read_pak(&path)?;
 
-        // Mime detection
-        let mime = MimeGuess::from_path(key)
+        // Read existing PAK file
+        let (mut entries, mut blob_data, mut metadata) = self.read_pak(&path)?;
+
+        // Detect current version
+        let version = entries.iter().map(|e| e.version).max().unwrap_or(0) + 1;
+
+        // Generate blob_id
+        let blob_id = Uuid::new_v4();
+
+        // Mime (path -> content -> fallback
+        let content_type = MimeGuess::from_path(key)
             .first()
-            .map(|m| m.essence_str().to_string());
+            .map(|m| m.essence_str().to_string())
+            .or_else(|| infer::get(content).map(|t| t.mime_type().to_string()))
+            .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        // SHA256 hashing
+        // SHA256 from plaintext
         let mut hasher = Sha256::new();
         hasher.update(content);
-        let hash = hex::encode(hasher.finalize());
+        let sha256_plain = hex::encode(hasher.finalize());
 
-        let (cipher_buf, nonce, _comp_len, enc_len) = self.codec.encode(content)?;
+        // Encode (compress + encrypt)
+        let (cipher_buf, nonce, compressed_len, encrypted_len) = self.codec.encode(content)?;
 
-        let version = entries.iter().map(|e| e.version).max().unwrap_or(0) + 1;
-        let blob_id = Uuid::new_v4();
-        let offset = blob_data.len() as u64;
+        // Offset inside PAK
+        let pak_offset = blob_data.len() as u64;
 
-        blob_data.extend(&cipher_buf);
+        // Append blob_data
+        blob_data.extend_from_slice(&cipher_buf);
 
-        entries.push(PakIndexEntry {
+        // Index entry (minimal without less)
+        let entry = PakIndexEntry {
             key: key.to_string(),
             version,
-            offset,
+            offset: pak_offset,
             size_original: content.len() as u64,
-            size_compressed: enc_len as u64,
+            size_compressed: encrypted_len as u64,
             nonce,
             blob_id,
-        });
+        };
 
-        let metadata = entries
-            .iter()
-            .map(|e| {
-                let mut meta = self.build_metadata(e);
-                
-                meta.content_type = mime.clone();
-                meta.content_checksum_sha256 = Some(hash.clone());
-                
-                meta
-            })
-            .collect::<Vec<_>>();
+        entries.push(entry);
+
+        // Etag (simple version-based)
+        let etag = format!("\"sha256:{}\"", sha256_plain);
+
+        // Metadata (extensible, API- oriented)
+        let meta = BlobMetadataBuilder::new()
+            .with_blob_id(blob_id)
+            .with_version(version)
+            .with_key(key.to_string())
+            .with_blob_type("default".to_string())
+            .with_created_at_unix(Utc::now().timestamp())
+            .with_updated_at_unix(Utc::now().timestamp())
+            .with_size_original(content.len() as u64)
+            .with_size_compressed(compressed_len as u64)
+            .with_size_encrypted(encrypted_len as u64)
+            .with_pak_offset(pak_offset)
+            .with_encryption_nonce(nonce)
+            .with_compression(CompressionKind::Zlib)
+            .with_encryption(EncryptionKind::Aes256Gcm)
+            .with_content_type(content_type)
+            .with_content_checksum_sha256(sha256_plain)
+            .with_content_etag(etag)
+            .build()
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        // Metadata append-only
+        metadata.push(meta);
+
         self.write_pak(&path, &entries, &blob_data, &metadata)?;
 
         Ok(())

@@ -1,9 +1,9 @@
 use anyhow::Result;
-use application::models::blob_metadata::BlobMetadata;
 use application::repository::blob_repository::BlobRepository;
 use application::services::blob_service::BlobService;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use domain::models::blob_metadata::BlobMetadata;
 
 /// Implementation of the BlobService trait.
 pub struct BlobServiceImpl<Repo: BlobRepository> {

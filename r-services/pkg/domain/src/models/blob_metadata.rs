@@ -38,6 +38,7 @@ pub struct BlobMetadata {
     /// Encryption
     pub encryption: EncryptionKind,
 
-    pub content_type: Option<String>,
-    pub content_checksum_sha256: Option<String>,
+    pub content_type: String,
+    pub content_checksum_sha256: String,
+    pub content_etag: String,
 }

@@ -1,8 +1,8 @@
-use crate::models::blob_metadata::BlobMetadata;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use domain::models::blob_metadata::BlobMetadata;
 
 /// Ru
 /// Репозиторий для взаимодействия с блоб-хранилищем.

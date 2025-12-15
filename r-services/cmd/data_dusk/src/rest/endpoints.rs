@@ -139,12 +139,10 @@ pub async fn head_info_handler(
         Ok(meta) => {
             let mut resp = Response::new(Body::empty());
 
-            if let Some(mime) = meta.content_type.clone() {
-                resp.headers_mut().insert(
-                    axum::http::header::CONTENT_TYPE,
-                    HeaderValue::from_str(&mime).unwrap(),
-                );
-            }
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_str(&meta.content_type).unwrap(),
+            );
 
             resp.headers_mut().insert(
                 "X-Blob-Version",
@@ -156,12 +154,15 @@ pub async fn head_info_handler(
                 HeaderValue::from_str(&meta.size_original.to_string()).unwrap(),
             );
 
-            if let Some(hash) = meta.content_checksum_sha256.clone() {
-                resp.headers_mut().insert(
-                    "X-Blob-SHA256",
-                    HeaderValue::from_str(&hash).unwrap(),
-                );
-            }
+            resp.headers_mut().insert(
+                "X-Blob-SHA256",
+                HeaderValue::from_str(&meta.content_checksum_sha256).unwrap(),
+            );
+
+            resp.headers_mut().insert(
+                "X-Blob-ETag",
+                HeaderValue::from_str(&meta.content_etag).unwrap(),
+            );
 
             *resp.status_mut() = StatusCode::OK;
             resp
