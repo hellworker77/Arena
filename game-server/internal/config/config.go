@@ -23,6 +23,10 @@ type Config struct {
 	ClientIdleTimeoutSec int
 	CleanupIntervalSec   int
 	UnauthEntryTTLSec    int
+
+	// Replication tuning
+	InterestRadius         float32
+	FullSnapshotEveryTicks int
 }
 
 func LoadFromEnv() (Config, error) {
@@ -83,6 +87,26 @@ func LoadFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid UNAUTH_ENTRY_TTL_SEC: %w", err)
 		}
 		c.UnauthEntryTTLSec = n
+	}
+
+	// Optional replication tuning
+	// INTEREST_RADIUS: simple distance culling for per-client snapshots.
+	// FULL_SNAPSHOT_EVERY_TICKS: forces a full snapshot at this cadence (delta snapshots otherwise).
+	c.InterestRadius = 25
+	c.FullSnapshotEveryTicks = 20
+	if v := os.Getenv("INTEREST_RADIUS"); v != "" {
+		n, err := strconv.ParseFloat(v, 32)
+		if err != nil {
+			return c, fmt.Errorf("invalid INTEREST_RADIUS: %w", err)
+		}
+		c.InterestRadius = float32(n)
+	}
+	if v := os.Getenv("FULL_SNAPSHOT_EVERY_TICKS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid FULL_SNAPSHOT_EVERY_TICKS: %w", err)
+		}
+		c.FullSnapshotEveryTicks = n
 	}
 
 	if c.UDPHost == "" || c.UDPPort == "" {

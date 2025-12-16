@@ -47,6 +47,15 @@ type Engine struct {
 
 	// players maps an external client key (currently: addr string) to per-player state.
 	players map[string]*playerState
+
+	// per-client replication state for delta snapshots.
+	snap map[string]*clientSnapState
+}
+
+type clientSnapState struct {
+	seq          uint32
+	lastFullTick uint32
+	lastSent     map[uint32]protocol.EntityState // entity id -> last state
 }
 
 func NewEngine() *Engine {
@@ -54,6 +63,7 @@ func NewEngine() *Engine {
 		world:   ecs.NewWorld(),
 		systems: []ecsSystems.ECSSystem{ecsSystems.MovementSystem{}},
 		players: map[string]*playerState{},
+		snap:    map[string]*clientSnapState{},
 	}
 }
 
@@ -82,12 +92,17 @@ func (e *Engine) AddPlayer(clientKey string) staticSig.EntityID {
 		entity: ent,
 		buffer: make(map[uint32]protocol.Input, 16),
 	}
+	// Initialize replication baseline for this client.
+	if _, ok := e.snap[clientKey]; !ok {
+		e.snap[clientKey] = &clientSnapState{lastSent: make(map[uint32]protocol.EntityState, 64)}
+	}
 	return ent
 }
 
 func (e *Engine) RemovePlayer(clientKey string) {
 	// World doesn't currently expose entity destruction; keep mapping removal only.
 	delete(e.players, clientKey)
+	delete(e.snap, clientKey)
 }
 
 // QueueInput stores an input for later consumption by Step().
@@ -169,16 +184,69 @@ func (e *Engine) Step(dt float32) {
 	}
 }
 
-// BuildPlayersSnapshot returns a payload that can be sent in a PTSnapshot packet.
-func (e *Engine) BuildPlayersSnapshot() []byte {
-	snapshots := make([]protocol.EntitySnapshot, 0, len(e.players))
-	for _, ps := range e.players {
-		pos := ecs.Get(e.world, ps.entity, ecs.Position)
-		snapshots = append(snapshots, protocol.EntitySnapshot{
-			ID:        uint32(ps.entity),
-			PositionX: pos.X,
-			PositionY: pos.Y,
-		})
+// BuildSnapshotForClient builds either a full or delta snapshot payload for a given client.
+// This method must be called only from the simulation thread.
+//
+// interestRadius controls which entities are relevant (simple distance culling).
+// fullEveryTicks forces a full snapshot at that cadence to bound drift.
+func (e *Engine) BuildSnapshotForClient(clientKey string, serverTick uint32, interestRadius float32, fullEveryTicks uint32) ([]byte, bool) {
+	ps, ok := e.players[clientKey]
+	if !ok {
+		return nil, false
 	}
-	return protocol.MarshalSnapshotPayload(snapshots)
+	cs, ok := e.snap[clientKey]
+	if !ok {
+		cs = &clientSnapState{lastSent: make(map[uint32]protocol.EntityState, 64)}
+		e.snap[clientKey] = cs
+	}
+	cs.seq++
+
+	// Determine client's position.
+	center := ecs.Get(e.world, ps.entity, ecs.Position)
+	r2 := interestRadius * interestRadius
+
+	// Collect relevant entities (currently: all players, culled by radius).
+	states := make(map[uint32]protocol.EntityState, 64)
+	for _, other := range e.players {
+		pos := ecs.Get(e.world, other.entity, ecs.Position)
+		dx := pos.X - center.X
+		dy := pos.Y - center.Y
+		if dx*dx+dy*dy > r2 {
+			continue
+		}
+		vel := ecs.Get(e.world, other.entity, ecs.Velocity)
+		id := uint32(other.entity)
+		states[id] = protocol.EntityState{ID: id, X: pos.X, Y: pos.Y, VX: vel.X, VY: vel.Y}
+	}
+
+	forceFull := fullEveryTicks > 0 && (serverTick == 0 || serverTick-cs.lastFullTick >= fullEveryTicks)
+	if forceFull || len(cs.lastSent) == 0 {
+		out := make([]protocol.EntityState, 0, len(states))
+		for _, st := range states {
+			out = append(out, st)
+		}
+		cs.lastSent = states
+		cs.lastFullTick = serverTick
+		return protocol.MarshalSnapshotFull(serverTick, cs.seq, out), true
+	}
+
+	// Delta: compute upserts + removes.
+	upserts := make([]protocol.EntityState, 0, 32)
+	removes := make([]uint32, 0, 16)
+
+	for id, cur := range states {
+		prev, ok := cs.lastSent[id]
+		if !ok || prev.X != cur.X || prev.Y != cur.Y || prev.VX != cur.VX || prev.VY != cur.VY {
+			upserts = append(upserts, cur)
+		}
+	}
+	for id := range cs.lastSent {
+		if _, ok := states[id]; !ok {
+			removes = append(removes, id)
+		}
+	}
+
+	// Update baseline.
+	cs.lastSent = states
+	return protocol.MarshalSnapshotDelta(serverTick, cs.seq, upserts, removes), true
 }

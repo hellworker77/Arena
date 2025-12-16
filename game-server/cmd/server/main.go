@@ -42,6 +42,9 @@ func main() {
 	}
 	defer srv.Close()
 
+	// Replication tuning
+	srv.ConfigureReplication(cfg.InterestRadius, uint32(cfg.FullSnapshotEveryTicks))
+
 	go srv.Listen()
 
 	// Graceful shutdown on SIGINT/SIGTERM.

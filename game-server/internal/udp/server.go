@@ -54,6 +54,14 @@ type Server struct {
 	Inputs chan udp_types2.InputPacket
 }
 
+// ConfigureReplication tunes interest management and delta snapshot cadence.
+// Call before Startup().
+func (s *Server) ConfigureReplication(interestRadius float32, fullEveryTicks uint32) {
+	if s.loop != nil {
+		s.loop.ConfigureReplication(interestRadius, fullEveryTicks)
+	}
+}
+
 func NewServer(addr string, jwtCfg auth.JwtCfg, allowLegacyAuth bool, clientIdleTimeout, cleanupInterval, unauthEntryTTL time.Duration) (*Server, error) {
 	if clientIdleTimeout <= 0 {
 		clientIdleTimeout = 30 * time.Second
@@ -140,8 +148,8 @@ func (s *Server) Startup() {
 	go s.processPackets()
 
 	// Simulation loop owns the authoritative game state.
-	s.loop.Run(s.ctx, func(snapshotPayload []byte) {
-		s.broadcastSnapshot(snapshotPayload)
+	s.loop.Run(s.ctx, func(frame game.SnapshotFrame) {
+		s.broadcastSnapshotFrame(frame)
 	})
 }
 
