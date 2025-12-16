@@ -3,4 +3,4 @@ backend-services
 target/
 .idea/
 db-data/
-r-services/pkg/blnary_lib
+repo/
