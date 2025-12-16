@@ -16,6 +16,8 @@ type Loop struct {
 	// replication settings
 	interestRadius    float32
 	fullEveryTicks    uint32
+	gridCellSize      float32
+	maxSnapshotBytes  int
 	serverTickCounter uint32
 }
 
@@ -38,23 +40,49 @@ func NewLoop(engine *Engine, tickRate int) *Loop {
 	if tickRate <= 0 {
 		tickRate = 20
 	}
-	return &Loop{
+	l := &Loop{
 		engine:         engine,
 		tickRate:       tickRate,
 		cmds:           make(chan command, 4096),
 		interestRadius: 25,
 		fullEveryTicks: 20, // 1s at 20Hz
+		gridCellSize:   8,
+		maxSnapshotBytes: 1200,
 	}
+	// Apply defaults to engine.
+	l.engine.ConfigureSpatialCellSize(l.gridCellSize)
+	l.engine.ConfigureReplicationBudget(l.maxSnapshotBytes)
+	return l
 }
 
 // ConfigureReplication overrides relevance/delta settings.
 func (l *Loop) ConfigureReplication(interestRadius float32, fullEveryTicks uint32) {
 	if interestRadius > 0 {
 		l.interestRadius = interestRadius
+		// If caller hasn't set a custom grid cell size, keep it at or below interest radius.
+		if l.gridCellSize <= 0 || l.gridCellSize > interestRadius {
+			l.gridCellSize = interestRadius
+			l.engine.ConfigureSpatialCellSize(l.gridCellSize)
+		}
 	}
 	if fullEveryTicks > 0 {
 		l.fullEveryTicks = fullEveryTicks
 	}
+}
+
+// ConfigureSpatialGrid sets the cell size for interest queries. Smaller = more cells, less contention per query.
+func (l *Loop) ConfigureSpatialGrid(cellSize float32) {
+	if cellSize <= 0 {
+		return
+	}
+	l.gridCellSize = cellSize
+	l.engine.ConfigureSpatialCellSize(cellSize)
+}
+
+// ConfigureSnapshotBudget sets a hard byte budget for snapshot payloads per client.
+func (l *Loop) ConfigureSnapshotBudget(maxBytes int) {
+	l.maxSnapshotBytes = maxBytes
+	l.engine.ConfigureReplicationBudget(maxBytes)
 }
 
 // AddPlayer enqueues player creation and waits for the entity id.

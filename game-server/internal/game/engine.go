@@ -6,6 +6,7 @@ import (
 	runtimeSig "game-server/internal/ecs/ecs_signatures/runtime"
 	staticSig "game-server/internal/ecs/ecs_signatures/static"
 	ecsSystems "game-server/internal/ecs/ecs_systems"
+	"game-server/internal/game/spatial"
 	"game-server/pkg/protocol"
 )
 
@@ -50,6 +51,13 @@ type Engine struct {
 
 	// per-client replication state for delta snapshots.
 	snap map[string]*clientSnapState
+
+	// spatial index for relevance queries.
+	grid *spatial.Grid
+
+	// snapshot byte budget per client (payload only, before encryption/UDP headers).
+	// If <=0, no budget is applied.
+	maxSnapshotBytes int
 }
 
 type clientSnapState struct {
@@ -64,7 +72,24 @@ func NewEngine() *Engine {
 		systems: []ecsSystems.ECSSystem{ecsSystems.MovementSystem{}},
 		players: map[string]*playerState{},
 		snap:    map[string]*clientSnapState{},
+		grid:    spatial.NewGrid(8),
+		// Default budget keeps payload small enough to comfortably fit a single UDP datagram.
+		maxSnapshotBytes: 1200,
 	}
+}
+
+// ConfigureReplicationBudget sets max snapshot payload size per client.
+func (e *Engine) ConfigureReplicationBudget(maxBytes int) {
+	e.maxSnapshotBytes = maxBytes
+}
+
+// ConfigureSpatialCellSize sets the grid cell size used for relevance queries.
+// Typically, set it to the interest radius or smaller.
+func (e *Engine) ConfigureSpatialCellSize(cellSize float32) {
+	if cellSize <= 0 {
+		return
+	}
+	e.grid.SetCellSize(cellSize)
 }
 
 func (e *Engine) World() *ecs.World { return e.world }
@@ -182,6 +207,14 @@ func (e *Engine) Step(dt float32) {
 	for _, sys := range e.systems {
 		sys.Run(e.world, dt)
 	}
+
+	// Rebuild spatial index for current tick. This is O(N) in number of indexed entities,
+	// which is fine at typical tick rates and makes per-client relevance queries cheap.
+	e.grid.Clear()
+	for _, ps := range e.players {
+		pos := ecs.Get(e.world, ps.entity, ecs.Position)
+		e.grid.Insert(uint32(ps.entity), pos.X, pos.Y)
+	}
 }
 
 // BuildSnapshotForClient builds either a full or delta snapshot payload for a given client.
@@ -205,18 +238,59 @@ func (e *Engine) BuildSnapshotForClient(clientKey string, serverTick uint32, int
 	center := ecs.Get(e.world, ps.entity, ecs.Position)
 	r2 := interestRadius * interestRadius
 
-	// Collect relevant entities (currently: all players, culled by radius).
+	// Collect relevant entities via spatial index.
+	// If a byte budget is configured, keep nearest entities first.
 	states := make(map[uint32]protocol.EntityState, 64)
-	for _, other := range e.players {
-		pos := ecs.Get(e.world, other.entity, ecs.Position)
-		dx := pos.X - center.X
-		dy := pos.Y - center.Y
-		if dx*dx+dy*dy > r2 {
-			continue
+	candidates := e.grid.QueryCircle(center.X, center.Y, interestRadius)
+	// candidates is already roughly local; we still distance-check precisely.
+	if e.maxSnapshotBytes > 0 {
+		// Build a stable list with distances for ordering.
+		type cand struct {
+			id   uint32
+			d2   float32
+			x, y float32
 		}
-		vel := ecs.Get(e.world, other.entity, ecs.Velocity)
-		id := uint32(other.entity)
-		states[id] = protocol.EntityState{ID: id, X: pos.X, Y: pos.Y, VX: vel.X, VY: vel.Y}
+		list := make([]cand, 0, len(candidates))
+		for _, id := range candidates {
+			ent := staticSig.EntityID(id)
+			pos := ecs.Get(e.world, ent, ecs.Position)
+			dx := pos.X - center.X
+			dy := pos.Y - center.Y
+			d2 := dx*dx + dy*dy
+			if d2 > r2 {
+				continue
+			}
+			list = append(list, cand{id: id, d2: d2, x: pos.X, y: pos.Y})
+		}
+		spatial.SortByDistance(list)
+
+		// Conservative size estimate.
+		// Full header: 11 bytes. Delta header: 13 bytes (includes removes count).
+		// EntityState: 20 bytes; remove id: 4 bytes.
+		budget := e.maxSnapshotBytes
+		minHeader := 11
+		est := minHeader
+		for _, c := range list {
+			if est+20 > budget {
+				break
+			}
+			ent := staticSig.EntityID(c.id)
+			vel := ecs.Get(e.world, ent, ecs.Velocity)
+			states[c.id] = protocol.EntityState{ID: c.id, X: c.x, Y: c.y, VX: vel.X, VY: vel.Y}
+			est += 20
+		}
+	} else {
+		for _, id := range candidates {
+			ent := staticSig.EntityID(id)
+			pos := ecs.Get(e.world, ent, ecs.Position)
+			dx := pos.X - center.X
+			dy := pos.Y - center.Y
+			if dx*dx+dy*dy > r2 {
+				continue
+			}
+			vel := ecs.Get(e.world, ent, ecs.Velocity)
+			states[id] = protocol.EntityState{ID: id, X: pos.X, Y: pos.Y, VX: vel.X, VY: vel.Y}
+		}
 	}
 
 	forceFull := fullEveryTicks > 0 && (serverTick == 0 || serverTick-cs.lastFullTick >= fullEveryTicks)

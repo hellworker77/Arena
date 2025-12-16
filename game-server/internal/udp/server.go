@@ -62,6 +62,21 @@ func (s *Server) ConfigureReplication(interestRadius float32, fullEveryTicks uin
 	}
 }
 
+// ConfigureReplicationAdvanced additionally sets spatial grid size and snapshot payload budget.
+// Call before Startup().
+func (s *Server) ConfigureReplicationAdvanced(interestRadius float32, fullEveryTicks uint32, gridCellSize float32, maxSnapshotBytes int) {
+	if s.loop == nil {
+		return
+	}
+	s.loop.ConfigureReplication(interestRadius, fullEveryTicks)
+	if gridCellSize > 0 {
+		s.loop.ConfigureSpatialGrid(gridCellSize)
+	}
+	if maxSnapshotBytes != 0 {
+		s.loop.ConfigureSnapshotBudget(maxSnapshotBytes)
+	}
+}
+
 func NewServer(addr string, jwtCfg auth.JwtCfg, allowLegacyAuth bool, clientIdleTimeout, cleanupInterval, unauthEntryTTL time.Duration) (*Server, error) {
 	if clientIdleTimeout <= 0 {
 		clientIdleTimeout = 30 * time.Second

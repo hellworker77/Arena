@@ -27,6 +27,8 @@ type Config struct {
 	// Replication tuning
 	InterestRadius         float32
 	FullSnapshotEveryTicks int
+	GridCellSize           float32
+	MaxSnapshotBytes       int
 }
 
 func LoadFromEnv() (Config, error) {
@@ -92,8 +94,12 @@ func LoadFromEnv() (Config, error) {
 	// Optional replication tuning
 	// INTEREST_RADIUS: simple distance culling for per-client snapshots.
 	// FULL_SNAPSHOT_EVERY_TICKS: forces a full snapshot at this cadence (delta snapshots otherwise).
+	// GRID_CELL_SIZE: spatial hash cell size used for interest queries.
+	// MAX_SNAPSHOT_BYTES: per-client hard payload budget (before encryption/UDP headers).
 	c.InterestRadius = 25
 	c.FullSnapshotEveryTicks = 20
+	c.GridCellSize = 8
+	c.MaxSnapshotBytes = 1200
 	if v := os.Getenv("INTEREST_RADIUS"); v != "" {
 		n, err := strconv.ParseFloat(v, 32)
 		if err != nil {
@@ -107,6 +113,20 @@ func LoadFromEnv() (Config, error) {
 			return c, fmt.Errorf("invalid FULL_SNAPSHOT_EVERY_TICKS: %w", err)
 		}
 		c.FullSnapshotEveryTicks = n
+	}
+	if v := os.Getenv("GRID_CELL_SIZE"); v != "" {
+		n, err := strconv.ParseFloat(v, 32)
+		if err != nil {
+			return c, fmt.Errorf("invalid GRID_CELL_SIZE: %w", err)
+		}
+		c.GridCellSize = float32(n)
+	}
+	if v := os.Getenv("MAX_SNAPSHOT_BYTES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c, fmt.Errorf("invalid MAX_SNAPSHOT_BYTES: %w", err)
+		}
+		c.MaxSnapshotBytes = n
 	}
 
 	if c.UDPHost == "" || c.UDPPort == "" {

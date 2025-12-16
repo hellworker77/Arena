@@ -43,7 +43,7 @@ func main() {
 	defer srv.Close()
 
 	// Replication tuning
-	srv.ConfigureReplication(cfg.InterestRadius, uint32(cfg.FullSnapshotEveryTicks))
+	srv.ConfigureReplicationAdvanced(cfg.InterestRadius, uint32(cfg.FullSnapshotEveryTicks), cfg.GridCellSize, cfg.MaxSnapshotBytes)
 
 	go srv.Listen()
 
