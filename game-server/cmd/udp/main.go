@@ -43,7 +43,16 @@ func main() {
 	addr := fmt.Sprintf("%s:%s", host, port)
 	log.Printf("Starting UDP server on %s...", addr)
 
-	srv, err := udp.NewServer(addr, jwtCfg)
+	allowLegacyAuth := false
+	if v := os.Getenv("ALLOW_LEGACY_AUTH"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			log.Fatalf("Invalid ALLOW_LEGACY_AUTH: %v", err)
+		}
+		allowLegacyAuth = b
+	}
+
+	srv, err := udp.NewServer(addr, jwtCfg, allowLegacyAuth)
 	if err != nil {
 		log.Fatalf("Failed to start UDP server: %v", err)
 	}
