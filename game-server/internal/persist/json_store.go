@@ -10,9 +10,7 @@ import (
 	"game-server/internal/shared"
 )
 
-type JSONStore struct {
-	Dir string
-}
+type JSONStore struct{ Dir string }
 
 func NewJSONStore(dir string) (*JSONStore, error) {
 	if dir == "" {
@@ -30,8 +28,7 @@ func (s *JSONStore) path(id shared.CharacterID) string {
 
 func (s *JSONStore) LoadCharacter(ctx context.Context, id shared.CharacterID) (CharacterState, bool, error) {
 	_ = ctx
-	p := s.path(id)
-	b, err := os.ReadFile(p)
+	b, err := os.ReadFile(s.path(id))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return CharacterState{}, false, nil
@@ -58,7 +55,6 @@ func (s *JSONStore) SaveCharacter(ctx context.Context, st CharacterState) error 
 	return os.Rename(tmp, s.path(st.CharacterID))
 }
 
-// tiny local u64 itoa to avoid pulling strconv all over (but strconv is stdlib anyway)
 func itoaU64(v uint64) string {
 	if v == 0 {
 		return "0"

@@ -12,14 +12,12 @@ type Grid struct {
 }
 
 func New(cellSize int16) *Grid {
-	if cellSize <= 0 {
-		cellSize = 8
-	}
+	if cellSize <= 0 { cellSize = 8 }
 	return &Grid{
 		CellSize: cellSize,
-		cells:    make(map[CellKey][]uint32),
-		xs:       make(map[uint32]int16),
-		ys:       make(map[uint32]int16),
+		cells: make(map[CellKey][]uint32),
+		xs: make(map[uint32]int16),
+		ys: make(map[uint32]int16),
 	}
 }
 
@@ -38,7 +36,7 @@ func (g *Grid) Insert(eid uint32, x, y int16) {
 
 func (g *Grid) cellOf(x, y int16) CellKey {
 	cs := float64(g.CellSize)
-	return CellKey{X: int32(math.Floor(float64(x) / cs)), Y: int32(math.Floor(float64(y) / cs))}
+	return CellKey{X: int32(math.Floor(float64(x)/cs)), Y: int32(math.Floor(float64(y)/cs))}
 }
 
 func (g *Grid) QueryCircle(cx, cy, r int16, out []uint32) []uint32 {
@@ -51,8 +49,7 @@ func (g *Grid) QueryCircle(cx, cy, r int16, out []uint32) []uint32 {
 	rr := int32(r) * int32(r)
 	for x := minX; x <= maxX; x++ {
 		for y := minY; y <= maxY; y++ {
-			ids := g.cells[CellKey{X: x, Y: y}]
-			for _, eid := range ids {
+			for _, eid := range g.cells[CellKey{X:x, Y:y}] {
 				ex := int32(g.xs[eid]); ey := int32(g.ys[eid])
 				dx := ex - int32(cx); dy := ey - int32(cy)
 				if dx*dx+dy*dy <= rr { out = append(out, eid) }

@@ -3,13 +3,17 @@ package wire
 type MsgType uint8
 
 const (
-	MsgAttachPlayer MsgType = 1
-	MsgDetachPlayer MsgType = 2
-	MsgPlayerInput  MsgType = 3
+	// Gateway -> Zone
+	MsgAttachPlayer        MsgType = 1
+	MsgAttachWithState     MsgType = 4
+	MsgDetachPlayer        MsgType = 2
+	MsgPlayerInput         MsgType = 3
 
-	MsgAttachAck MsgType = 101
-	MsgError     MsgType = 102
-	MsgReplicate MsgType = 103
+	// Zone -> Gateway
+	MsgAttachAck           MsgType = 101
+	MsgError               MsgType = 102
+	MsgReplicate           MsgType = 103
+	MsgTransfer            MsgType = 104
 )
 
 type ErrCode uint16
@@ -36,6 +40,5 @@ const (
 	RepMove    RepOp = 3
 
 	RepStateHP RepOp = 10
-
 	RepEventText RepOp = 20
 )

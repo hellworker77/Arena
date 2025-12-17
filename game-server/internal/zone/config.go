@@ -10,15 +10,16 @@ type Config struct {
 	AOIRadius int16
 	CellSize  int16
 
-	MaxMoveEvents  int
-	MaxStateEvents int
-	MaxEventEvents int
-
 	BudgetBytes int
 	StateEveryTicks int
 
-	// persistence
 	SaveEveryTicks int
 	Store persist.Store
 	SaveQ  *persist.SaveQueue
+
+	// Transfer policy (toy boundary-based):
+	// If TransferBoundaryX > 0 => transfer when X > boundary.
+	// If TransferBoundaryX < 0 => transfer when X < boundary.
+	TransferTargetZone uint32
+	TransferBoundaryX int16
 }

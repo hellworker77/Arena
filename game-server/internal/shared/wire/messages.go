@@ -4,9 +4,11 @@ import (
 	"encoding/binary"
 	"errors"
 
+	"game-server/internal/persist"
 	"game-server/internal/shared"
 )
 
+// Attach: [sid:16][cid:u64][zid:u32]
 func EncodeAttachPlayer(sid shared.SessionID, cid shared.CharacterID, zid shared.ZoneID) []byte {
 	b := make([]byte, 28)
 	copy(b[0:16], sid[:])
@@ -25,6 +27,32 @@ func DecodeAttachPlayer(b []byte) (sid shared.SessionID, cid shared.CharacterID,
 	return
 }
 
+// AttachWithState: [sid:16][cid:u64][zid:u32][x:i16][y:i16][hp:u16]
+func EncodeAttachWithState(sid shared.SessionID, cid shared.CharacterID, zid shared.ZoneID, x, y int16, hp uint16) []byte {
+	b := make([]byte, 28+2+2+2)
+	copy(b[0:16], sid[:])
+	binary.LittleEndian.PutUint64(b[16:24], uint64(cid))
+	binary.LittleEndian.PutUint32(b[24:28], uint32(zid))
+	binary.LittleEndian.PutUint16(b[28:30], uint16(x))
+	binary.LittleEndian.PutUint16(b[30:32], uint16(y))
+	binary.LittleEndian.PutUint16(b[32:34], hp)
+	return b
+}
+
+func DecodeAttachWithState(b []byte) (sid shared.SessionID, cid shared.CharacterID, zid shared.ZoneID, x, y int16, hp uint16, err error) {
+	if len(b) != 34 {
+		return sid, 0, 0, 0, 0, 0, errors.New("bad attach-with-state payload")
+	}
+	copy(sid[:], b[0:16])
+	cid = shared.CharacterID(binary.LittleEndian.Uint64(b[16:24]))
+	zid = shared.ZoneID(binary.LittleEndian.Uint32(b[24:28]))
+	x = int16(binary.LittleEndian.Uint16(b[28:30]))
+	y = int16(binary.LittleEndian.Uint16(b[30:32]))
+	hp = binary.LittleEndian.Uint16(b[32:34])
+	return
+}
+
+// Detach: [sid:16]
 func EncodeDetachPlayer(sid shared.SessionID) []byte {
 	b := make([]byte, 16)
 	copy(b, sid[:])
@@ -39,6 +67,7 @@ func DecodeDetachPlayer(b []byte) (sid shared.SessionID, err error) {
 	return
 }
 
+// Input: [sid:16][tick:u32][mx:i16][my:i16]
 func EncodePlayerInput(sid shared.SessionID, clientTick uint32, mx, my int16) []byte {
 	b := make([]byte, 24)
 	copy(b[0:16], sid[:])
@@ -59,6 +88,7 @@ func DecodePlayerInput(b []byte) (sid shared.SessionID, tick uint32, mx, my int1
 	return
 }
 
+// Error: [code:u16][msgLen:u16][msgBytes...]
 func EncodeError(code ErrCode, msg string) []byte {
 	if len(msg) > 65535 {
 		msg = msg[:65535]
@@ -91,25 +121,20 @@ type RepEvent struct {
 }
 
 func EncodeReplicate(sid shared.SessionID, serverTick uint32, ch RepChannel, events []RepEvent) []byte {
-	if len(events) > 65535 {
-		events = events[:65535]
-	}
+	if len(events) > 65535 { events = events[:65535] }
 	sz := 16 + 4 + 1 + 2
 	for _, e := range events {
 		switch e.Op {
 		case RepSpawn, RepMove:
-			sz += 1 + 4 + 4
+			sz += 1+4+4
 		case RepDespawn:
-			sz += 1 + 4
+			sz += 1+4
 		case RepStateHP:
-			sz += 1 + 4 + 2
+			sz += 1+4+2
 		case RepEventText:
 			txt := e.Text
-			if len(txt) > 65535 {
-				txt = txt[:65535]
-			}
-			sz += 1 + 2 + len(txt)
-		default:
+			if len(txt) > 65535 { txt = txt[:65535] }
+			sz += 1+2+len(txt)
 		}
 	}
 	b := make([]byte, sz)
@@ -135,9 +160,7 @@ func EncodeReplicate(sid shared.SessionID, serverTick uint32, ch RepChannel, eve
 			binary.LittleEndian.PutUint16(b[off:off+2], e.Val); off += 2
 		case RepEventText:
 			txt := e.Text
-			if len(txt) > 65535 {
-				txt = txt[:65535]
-			}
+			if len(txt) > 65535 { txt = txt[:65535] }
 			b[off] = byte(e.Op); off++
 			binary.LittleEndian.PutUint16(b[off:off+2], uint16(len(txt))); off += 2
 			copy(b[off:], []byte(txt)); off += len(txt)
@@ -157,9 +180,7 @@ func DecodeReplicate(b []byte) (sid shared.SessionID, serverTick uint32, ch RepC
 	off := 23
 	events = make([]RepEvent, 0, n)
 	for i := 0; i < n; i++ {
-		if off+1 > len(b) {
-			return sid, 0, 0, nil, errors.New("bad replicate payload length")
-		}
+		if off+1 > len(b) { return sid, 0, 0, nil, errors.New("bad replicate payload length") }
 		op := RepOp(b[off]); off++
 		switch op {
 		case RepSpawn, RepMove:
@@ -187,8 +208,31 @@ func DecodeReplicate(b []byte) (sid shared.SessionID, serverTick uint32, ch RepC
 			return sid, 0, 0, nil, errors.New("unknown replicate op")
 		}
 	}
-	if off != len(b) {
-		return sid, 0, 0, nil, errors.New("extra bytes in replicate payload")
+	if off != len(b) { return sid, 0, 0, nil, errors.New("extra bytes in replicate payload") }
+	return
+}
+
+// Transfer: [sid:16][cid:u64][targetZone:u32][x:i16][y:i16][hp:u16]
+func EncodeTransfer(sid shared.SessionID, cid shared.CharacterID, target shared.ZoneID, st persist.CharacterState) []byte {
+	b := make([]byte, 16+8+4+2+2+2)
+	copy(b[0:16], sid[:])
+	binary.LittleEndian.PutUint64(b[16:24], uint64(cid))
+	binary.LittleEndian.PutUint32(b[24:28], uint32(target))
+	binary.LittleEndian.PutUint16(b[28:30], uint16(st.X))
+	binary.LittleEndian.PutUint16(b[30:32], uint16(st.Y))
+	binary.LittleEndian.PutUint16(b[32:34], st.HP)
+	return b
+}
+
+func DecodeTransfer(b []byte) (sid shared.SessionID, cid shared.CharacterID, target shared.ZoneID, x, y int16, hp uint16, err error) {
+	if len(b) != 34 {
+		return sid, 0, 0, 0, 0, 0, errors.New("bad transfer payload")
 	}
+	copy(sid[:], b[0:16])
+	cid = shared.CharacterID(binary.LittleEndian.Uint64(b[16:24]))
+	target = shared.ZoneID(binary.LittleEndian.Uint32(b[24:28]))
+	x = int16(binary.LittleEndian.Uint16(b[28:30]))
+	y = int16(binary.LittleEndian.Uint16(b[30:32]))
+	hp = binary.LittleEndian.Uint16(b[32:34])
 	return
 }
