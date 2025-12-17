@@ -16,7 +16,7 @@ func main() {
 	var udpAddr string
 	var proto uint
 	flag.StringVar(&udpAddr, "udp", ":7777", "UDP listen address")
-	flag.UintVar(&proto, "proto", 1, "UDP protocol version (HELLO <proto> <charID>)")
+	flag.UintVar(&proto, "proto", 1, "UDP protocol version")
 
 	zones := make(gateway.ZoneFlags)
 	flag.Var(zones, "zone", "Zone mapping: <zoneID>=<host:port> (repeatable)")

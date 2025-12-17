@@ -1,74 +1,46 @@
-# MMORPG 2D — Steps 13 → 20 (sequential, no legacy)
+# MMORPG 2D — Step 21: reliable channel over UDP (seq/ack/ackbits)
 
-This bundle implements Steps **13–20** in one coherent codebase (so each step builds on the previous cleanly).
-Everything remains a **skeleton** (toy data + plaintext UDP), but the architecture follows modern MMO server practice.
+This step replaces the old plaintext UDP demo with a **binary, versioned, reliable UDP layer**
+between **Client <-> Gateway**.
 
-## How to run (2 zones + gateway)
+Why: for MMO-like gameplay you need reliability for session control and actions:
+- HELLO / attach
+- actions (combat, interactions)
+- optional critical events
+while keeping movement/input **unreliable** for latency.
 
-Terminal A (zone 1):
+## What is reliable here
+- Client->Gateway: HELLO and ACT are sent on Reliable channel (retransmit until ack).
+- Client->Gateway: IN (movement) is Unreliable (no resend).
+- Gateway->Client: critical TEXT events are Reliable (demo); replicate streams remain Unreliable.
+
+## Run (2 zones + gateway + client)
+
+Zone 1:
 ```bash
 go run ./cmd/zone -listen 127.0.0.1:4000 -zone 1 -store ./data1 -http :9101
 ```
 
-Terminal B (zone 2):
+Zone 2:
 ```bash
 go run ./cmd/zone -listen 127.0.0.1:4001 -zone 2 -store ./data2 -http :9102
 ```
 
-Terminal C (gateway):
+Gateway:
 ```bash
 go run ./cmd/gateway -udp :7777 -zone 1=127.0.0.1:4000 -zone 2=127.0.0.1:4001 -proto 1
 ```
 
-Client (toy plaintext):
-- `HELLO <proto> <charID>`  (proto must match gateway `-proto`)
-- `IN <tick> <mx> <my>`
-- `ACT <tick> <skill> <targetEID>` (skill=1 is a toy melee hit)
-
-Example:
+Client:
 ```bash
-echo "HELLO 1 1" | nc -u -w1 127.0.0.1 7777
-echo "IN 1 2 0" | nc -u -w1 127.0.0.1 7777
-echo "ACT 2 1 1" | nc -u -w1 127.0.0.1 7777
+go run ./cmd/client -addr 127.0.0.1:7777 -proto 1 -char 1
 ```
 
-## Step index
+In client:
+- WASD-like: type `m dx dy` (e.g. `m 2 0`)
+- action: `a skill targetEID` (e.g. `a 1 1`)
+- quit: `q`
 
-### Step 13 — **2‑phase zone transfer (prepare/commit/abort)**
-- Zone never deletes the player immediately.
-- Gateway orchestrates:
-  1) `TRANSFER_PREPARE` from old zone
-  2) `ATTACH_WITH_STATE` to target zone
-  3) upon target `ATTACH_ACK` → `TRANSFER_COMMIT` to old zone
-  4) if timeout/failure → `TRANSFER_ABORT` to old zone
-
-### Step 14 — **Ownership + interest layers**
-- Entities have `Kind` and `InterestMask`.
-- Player has `InterestMask`.
-- AOI replication filters by interest layers.
-
-### Step 15 — **Server‑authoritative combat (anti‑cheat)**
-- Client sends `ACT` as an *intent*.
-- Zone validates cooldown + range and applies damage server-side.
-- Results replicated via Event/State (no client-authoritative damage).
-
-### Step 16 — **ECS-ish component split**
-- Position, Velocity, Health, Owner, Kind are stored in separate component stores.
-- Removes the “god struct entity”.
-
-### Step 17 — **AI + simulation budgets**
-- NPCs exist and wander.
-- AI budget per tick, and LOD:
-  - only NPCs near *any* player get updated.
-
-### Step 18 — **Fault tolerance via snapshots**
-- Zone periodically snapshots world + players to disk **asynchronously** (never in the tick).
-- On start, zone loads its snapshot if present.
-
-### Step 19 — **Metrics**
-- Per-zone `/metrics` (Prometheus text format) and `/debug/vars` (expvar).
-- Tick durations, entity counts, replication bytes.
-
-### Step 20 — **Protocol contract**
-- UDP has a strict proto version (`HELLO <proto> <charID>`).
-- Internal wire has an explicit `WireVersion` constant in code + documented message formats.
+Notes:
+- The reliable layer is a standard UDP pattern: `seq`, `ack`, `ackBits` (32-bit window).
+- This is still a skeleton: no encryption, no congestion control, no compression.

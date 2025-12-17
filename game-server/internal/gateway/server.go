@@ -44,15 +44,14 @@ type sessionState struct {
 	Interest wire.InterestMask
 	LastHeard time.Time
 	Proto uint16
+
+	peer *reliablePeer
+	raddr *net.UDPAddr
 }
 
 type xferState struct {
 	From shared.ZoneID
 	To shared.ZoneID
-	CID shared.CharacterID
-	Interest wire.InterestMask
-	X, Y int16
-	HP uint16
 	Started time.Time
 }
 
@@ -92,10 +91,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go s.cleanupLoop(ctx)
 	go s.transferTimeoutLoop(ctx)
+	go s.retransmitLoop(ctx)
 
 	log.Printf("gateway up: udp=%s zones=%d proto=%d", s.cfg.UDPListenAddr, len(s.cfg.Zones), s.cfg.ProtoVersion)
 
-	buf := make([]byte, 2048)
+	buf := make([]byte, 64*1024)
 	for {
 		select { case <-ctx.Done(): return nil; default: }
 		_ = s.udpConn.SetReadDeadline(time.Now().Add(500*time.Millisecond))
@@ -138,131 +138,106 @@ func (s *Server) zoneSend(zid uint32, typ wire.MsgType, payload []byte) error {
 	return wire.WriteFrame(zl.w, typ, payload)
 }
 
-// UDP protocol (Step20 strict):
-// - "HELLO <proto> <charID> [interestMask]"  (interest optional; default all)
-// - "IN <tick> <mx> <my>"
-// - "ACT <tick> <skill> <targetEID>"
 func (s *Server) handleUDPPacket(raddr *net.UDPAddr, b []byte) {
-	line := string(b)
-	ra := raddr.String()
+	p, err := DecodePacket(b)
+	if err != nil {
+		return
+	}
+	if p.Proto != s.cfg.ProtoVersion {
+		return
+	}
+	remote := raddr.String()
 
-	if len(line) >= 5 && line[:5] == "HELLO" {
-		var proto uint16
-		var cid uint64
-		var imask uint32
-		n, err := sscanf(line, "HELLO %d %d %d", &proto, &cid, &imask)
-		if err != nil || cid == 0 || proto == 0 {
-			_, _ = s.udpConn.WriteToUDP([]byte("ERR bad hello
-"), raddr)
+	st := s.getOrCreate(remote, raddr, p.Proto)
+
+	// Process ACKs for reliable channel (both on any packet)
+	st.peer.onAcks(p.Ack, p.AckBits)
+
+	// Update receive window if incoming is reliable
+	if p.Chan == ChanReliable {
+		st.peer.updateRecv(p.Seq)
+	}
+
+	st.LastHeard = time.Now()
+
+	switch p.PType {
+	case PHello:
+		if p.Chan != ChanReliable {
 			return
 		}
-		if proto != s.cfg.ProtoVersion {
-			_, _ = s.udpConn.WriteToUDP([]byte("ERR bad proto
-"), raddr)
-			return
-		}
-		interest := wire.InterestMask(0)
-		if n >= 3 {
-			interest = wire.InterestMask(imask)
-		}
+		if len(p.Payload) < 8+4 { return }
+		cid := shared.CharacterID(binaryLEU64(p.Payload[0:8]))
+		interest := wire.InterestMask(binaryLEU32(p.Payload[8:12]))
+		if cid == 0 { return }
 		if interest == 0 {
 			interest = wire.InterestMove | wire.InterestState | wire.InterestEvent | wire.InterestCombat
 		}
-		st := s.ensureSession(ra, proto, shared.CharacterID(cid), interest)
-		if err := s.zoneSend(uint32(st.ZoneID), wire.MsgAttachPlayer, wire.EncodeAttachPlayer(st.SID, st.CharID, st.ZoneID, st.Interest)); err != nil {
-			_, _ = s.udpConn.WriteToUDP([]byte("ERR zone down
-"), raddr)
-			return
-		}
-		_, _ = s.udpConn.WriteToUDP([]byte("OK "+st.SID.String()+"
-"), raddr)
-		return
-	}
+		st.CharID = cid
+		st.Interest = interest
 
-	if len(line) >= 2 && line[:2] == "IN" {
-		var tick uint32
-		var mx, my int16
-		if _, err := sscanf(line, "IN %d %d %d", &tick, &mx, &my); err != nil {
-			_, _ = s.udpConn.WriteToUDP([]byte("ERR bad input
-"), raddr)
-			return
+		// choose default zone (min id)
+		if st.ZoneID == 0 {
+			var min uint32 = 0
+			for zid := range s.cfg.Zones {
+				if min == 0 || zid < min { min = zid }
+			}
+			st.ZoneID = shared.ZoneID(min)
 		}
-		st := s.getByRemote(ra)
-		if st == nil {
-			_, _ = s.udpConn.WriteToUDP([]byte("ERR no session
-"), raddr)
-			return
-		}
-		st.LastHeard = time.Now()
+		_ = s.zoneSend(uint32(st.ZoneID), wire.MsgAttachPlayer, wire.EncodeAttachPlayer(st.SID, st.CharID, st.ZoneID, st.Interest))
+
+		// Send a reliable text ACK to client
+		s.sendReliableText(st, "HELLO_OK sid="+st.SID.String())
+
+	case PInput:
+		if len(p.Payload) < 4+2+2 { return }
+		if st.ZoneID == 0 { return }
+		tick := binaryLEU32(p.Payload[0:4])
+		mx := int16(binaryLEU16(p.Payload[4:6]))
+		my := int16(binaryLEU16(p.Payload[6:8]))
 		_ = s.zoneSend(uint32(st.ZoneID), wire.MsgPlayerInput, wire.EncodePlayerInput(st.SID, tick, mx, my))
-		return
-	}
 
-	if len(line) >= 3 && line[:3] == "ACT" {
-		var tick uint32
-		var skill uint16
-		var target uint32
-		if _, err := sscanf(line, "ACT %d %d %d", &tick, &skill, &target); err != nil {
-			_, _ = s.udpConn.WriteToUDP([]byte("ERR bad act
-"), raddr)
-			return
-		}
-		st := s.getByRemote(ra)
-		if st == nil {
-			_, _ = s.udpConn.WriteToUDP([]byte("ERR no session
-"), raddr)
-			return
-		}
-		st.LastHeard = time.Now()
-		_ = s.zoneSend(uint32(st.ZoneID), wire.MsgPlayerAction, wire.EncodePlayerAction(st.SID, tick, skill, shared.EntityID(target)))
-		return
-	}
+	case PAction:
+		if p.Chan != ChanReliable { return }
+		if len(p.Payload) < 4+2+4 { return }
+		if st.ZoneID == 0 { return }
+		tick := binaryLEU32(p.Payload[0:4])
+		skill := binaryLEU16(p.Payload[4:6])
+		target := shared.EntityID(binaryLEU32(p.Payload[6:10]))
+		_ = s.zoneSend(uint32(st.ZoneID), wire.MsgPlayerAction, wire.EncodePlayerAction(st.SID, tick, skill, target))
 
-	_, _ = s.udpConn.WriteToUDP([]byte("ERR unknown
-"), raddr)
+	default:
+	}
 }
 
-func (s *Server) ensureSession(remote string, proto uint16, cid shared.CharacterID, interest wire.InterestMask) *sessionState {
+func (s *Server) getOrCreate(remote string, raddr *net.UDPAddr, proto uint16) *sessionState {
 	s.sessionsMu.Lock()
 	defer s.sessionsMu.Unlock()
 	if st, ok := s.byRemote[remote]; ok {
-		st.LastHeard = time.Now()
+		st.raddr = raddr
 		return st
-	}
-	var min uint32 = 0
-	for zid := range s.cfg.Zones {
-		if min == 0 || zid < min { min = zid }
 	}
 	st := &sessionState{
 		SID: shared.NewSessionID(),
-		CharID: cid,
-		ZoneID: shared.ZoneID(min),
-		Interest: interest,
+		CharID: 0,
+		ZoneID: 0,
+		Interest: 0,
 		LastHeard: time.Now(),
 		Proto: proto,
+		peer: newPeer(),
+		raddr: raddr,
 	}
 	s.byRemote[remote] = st
 	s.bySID[st.SID] = remote
 	return st
 }
 
-func (s *Server) getByRemote(remote string) *sessionState {
-	s.sessionsMu.Lock(); defer s.sessionsMu.Unlock()
-	return s.byRemote[remote]
-}
-
-func (s *Server) getRemoteBySID(sid shared.SessionID) (string, *sessionState, bool) {
-	s.sessionsMu.Lock(); defer s.sessionsMu.Unlock()
+func (s *Server) getBySID(sid shared.SessionID) (*sessionState, bool) {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
 	ra, ok := s.bySID[sid]
-	if !ok { return "", nil, false }
-	return ra, s.byRemote[ra], true
-}
-
-func (s *Server) setSessionZone(sid shared.SessionID, newZone shared.ZoneID) {
-	s.sessionsMu.Lock(); defer s.sessionsMu.Unlock()
-	ra, ok := s.bySID[sid]
-	if !ok { return }
-	if st := s.byRemote[ra]; st != nil { st.ZoneID = newZone }
+	if !ok { return nil, false }
+	st := s.byRemote[ra]
+	return st, st != nil
 }
 
 func (s *Server) cleanupLoop(ctx context.Context) {
@@ -285,7 +260,9 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 			}
 			s.sessionsMu.Unlock()
 			for _, d := range toDetach {
-				_ = s.zoneSend(uint32(d.zid), wire.MsgDetachPlayer, wire.EncodeDetachPlayer(d.sid))
+				if d.zid != 0 {
+					_ = s.zoneSend(uint32(d.zid), wire.MsgDetachPlayer, wire.EncodeDetachPlayer(d.sid))
+				}
 			}
 		}
 	}
@@ -300,10 +277,7 @@ func (s *Server) transferTimeoutLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			now := time.Now()
-			var abort []struct{
-				sid shared.SessionID
-				from shared.ZoneID
-			}
+			var abort []struct{ sid shared.SessionID; from shared.ZoneID }
 			s.xferMu.Lock()
 			for sid, xs := range s.inflight {
 				if now.Sub(xs.Started) > s.cfg.TransferTimeout {
@@ -314,9 +288,86 @@ func (s *Server) transferTimeoutLoop(ctx context.Context) {
 			s.xferMu.Unlock()
 			for _, a := range abort {
 				_ = s.zoneSend(uint32(a.from), wire.MsgTransferAbort, wire.EncodeTransferAbort(a.sid))
+				if st, ok := s.getBySID(a.sid); ok {
+					s.sendReliableText(st, "XFER_ABORT timeout")
+				}
 			}
 		}
 	}
+}
+
+func (s *Server) retransmitLoop(ctx context.Context) {
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	buf := make([]byte, 0, 2048)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			now := time.Now()
+			// iterate sessions and resend pending
+			var sends []struct{
+				addr *net.UDPAddr
+				pkt []byte
+				st *sessionState
+				seq uint32
+			}
+			s.sessionsMu.Lock()
+			for _, st := range s.byRemote {
+				if st.raddr == nil || st.peer == nil { continue }
+				for seq, sm := range st.peer.pending {
+					if now.Sub(sm.sentAt) >= st.peer.rto {
+						if sm.retries >= st.peer.maxRetries {
+							delete(st.peer.pending, seq)
+							continue
+						}
+						sm.retries++
+						sm.sentAt = now
+						sends = append(sends, struct{
+							addr *net.UDPAddr; pkt []byte; st *sessionState; seq uint32
+						}{addr: st.raddr, pkt: sm.pkt, st: st, seq: seq})
+					}
+				}
+			}
+			s.sessionsMu.Unlock()
+			for _, it := range sends {
+				_, _ = s.udpConn.WriteToUDP(it.pkt, it.addr)
+				_ = buf
+			}
+		}
+	}
+}
+
+func (s *Server) sendReliableText(st *sessionState, msg string) {
+	if st == nil || st.raddr == nil { return }
+	seq := st.peer.allocSeq()
+	payload := []byte(msg)
+	pkt := EncodePacket(Packet{
+		Proto: s.cfg.ProtoVersion,
+		Chan: ChanReliable,
+		PType: PText,
+		Seq: seq,
+		Ack: st.peer.recvMax,
+		AckBits: st.peer.recvMask,
+		Payload: payload,
+	}, nil)
+	st.peer.pending[seq] = &sentMsg{seq: seq, pkt: pkt, sentAt: time.Now(), retries: 0}
+	_, _ = s.udpConn.WriteToUDP(pkt, st.raddr)
+}
+
+func (s *Server) sendUnreliableRep(st *sessionState, line string) {
+	if st == nil || st.raddr == nil { return }
+	pkt := EncodePacket(Packet{
+		Proto: s.cfg.ProtoVersion,
+		Chan: ChanUnreliable,
+		PType: PRep,
+		Seq: 0,
+		Ack: st.peer.recvMax,
+		AckBits: st.peer.recvMask,
+		Payload: []byte(line),
+	}, nil)
+	_, _ = s.udpConn.WriteToUDP(pkt, st.raddr)
 }
 
 func (s *Server) zoneReadLoop(ctx context.Context, zl *zoneLink) {
@@ -329,58 +380,45 @@ func (s *Server) zoneReadLoop(ctx context.Context, zl *zoneLink) {
 		}
 		switch fr.Type {
 		case wire.MsgAttachAck:
-			// If this ACK corresponds to a transfer target, commit.
-			// We key by SID: if inflight.To == this zone, commit old zone.
-			// (Strict but simple: assumes only one inflight per SID.)
-			// In real MMO you'd include transfer token.
 			s.tryCommitOnAttachAck(zl.id)
-
 		case wire.MsgReplicate:
 			sid, _, ch, events, err := wire.DecodeReplicate(fr.Payload)
 			if err != nil { continue }
-			remote, _, ok := s.getRemoteBySID(sid)
+			st, ok := s.getBySID(sid)
 			if !ok { continue }
-			raddr, err := net.ResolveUDPAddr("udp", remote)
-			if err != nil { continue }
-
+			// ship as human-readable lines (demo), unreliable
 			switch ch {
 			case wire.ChanMove:
 				for _, ev := range events {
 					switch ev.Op {
 					case wire.RepSpawn:
-						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("SPAWN %d %d %d kind=%d mask=%d
-", uint32(ev.EID), ev.X, ev.Y, ev.Kind, uint32(ev.Mask))), raddr)
+						s.sendUnreliableRep(st, sprintf("SPAWN %d %d %d kind=%d mask=%d", uint32(ev.EID), ev.X, ev.Y, ev.Kind, uint32(ev.Mask)))
 					case wire.RepDespawn:
-						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("DESPAWN %d
-", uint32(ev.EID))), raddr)
+						s.sendUnreliableRep(st, sprintf("DESPAWN %d", uint32(ev.EID)))
 					case wire.RepMove:
-						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("MOV %d %d %d
-", uint32(ev.EID), ev.X, ev.Y)), raddr)
+						s.sendUnreliableRep(st, sprintf("MOV %d %d %d", uint32(ev.EID), ev.X, ev.Y))
 					}
 				}
 			case wire.ChanState:
 				for _, ev := range events {
 					if ev.Op == wire.RepStateHP {
-						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("STAT %d hp=%d
-", uint32(ev.EID), ev.Val)), raddr)
+						s.sendUnreliableRep(st, sprintf("STAT %d hp=%d", uint32(ev.EID), ev.Val))
 					}
 				}
 			case wire.ChanEvent:
 				for _, ev := range events {
 					if ev.Op == wire.RepEventText {
-						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("EV %s
-", ev.Text)), raddr)
+						// demo: send reliable event text
+						s.sendReliableText(st, "EV "+ev.Text)
 					}
 				}
 			}
-
 		case wire.MsgTransferPrepare:
-			// Step13: 2PC transfer orchestration
-			sid, cid, target, interest, x, y, hp, err := wire.DecodeTransferPrepare(fr.Payload)
+			sid, _, target, interest, x, y, hp, err := wire.DecodeTransferPrepare(fr.Payload)
 			if err != nil { continue }
 
-			_, st, ok := s.getRemoteBySID(sid)
-			if !ok || st == nil { continue }
+			st, ok := s.getBySID(sid)
+			if !ok { continue }
 
 			// validate target exists
 			s.zonesMu.Lock()
@@ -388,27 +426,24 @@ func (s *Server) zoneReadLoop(ctx context.Context, zl *zoneLink) {
 			s.zonesMu.Unlock()
 			if !okTarget {
 				_ = s.zoneSend(uint32(st.ZoneID), wire.MsgTransferAbort, wire.EncodeTransferAbort(sid))
+				s.sendReliableText(st, "XFER_ABORT bad_target")
 				continue
 			}
 
-			// register inflight
 			s.xferMu.Lock()
 			s.inflight[sid] = &xferState{
 				From: st.ZoneID,
 				To: shared.ZoneID(target),
-				CID: cid,
-				Interest: interest,
-				X: x, Y: y, HP: hp,
 				Started: time.Now(),
 			}
 			s.xferMu.Unlock()
 
-			// attach with state to target
-			_ = s.zoneSend(uint32(target), wire.MsgAttachWithState, wire.EncodeAttachWithState(sid, cid, shared.ZoneID(target), interest, x, y, hp))
-			// route input immediately to target (client stays on gateway)
-			s.setSessionZone(sid, shared.ZoneID(target))
-
-			log.Printf("xfer prepare: sid=%s %d->%d", sid.String(), st.ZoneID, target)
+			// attach to target
+			_ = s.zoneSend(uint32(target), wire.MsgAttachWithState, wire.EncodeAttachWithState(sid, st.CharID, shared.ZoneID(target), interest, x, y, hp))
+			// route to target
+			st.ZoneID = shared.ZoneID(target)
+			st.Interest = interest
+			s.sendReliableText(st, sprintf("XFER_PREP %d->%d", zl.id, target))
 
 		case wire.MsgError:
 			code, msg, _ := wire.DecodeError(fr.Payload)
@@ -418,11 +453,7 @@ func (s *Server) zoneReadLoop(ctx context.Context, zl *zoneLink) {
 }
 
 func (s *Server) tryCommitOnAttachAck(ackZoneID uint32) {
-	// Find inflight transfers whose target == ackZoneID and commit them.
-	var commits []struct{
-		sid shared.SessionID
-		from shared.ZoneID
-	}
+	var commits []struct{ sid shared.SessionID; from shared.ZoneID }
 	s.xferMu.Lock()
 	for sid, xs := range s.inflight {
 		if uint32(xs.To) == ackZoneID {
@@ -434,6 +465,13 @@ func (s *Server) tryCommitOnAttachAck(ackZoneID uint32) {
 
 	for _, c := range commits {
 		_ = s.zoneSend(uint32(c.from), wire.MsgTransferCommit, wire.EncodeTransferCommit(c.sid))
-		log.Printf("xfer commit: sid=%s from=%d", c.sid.String(), c.from)
+		if st, ok := s.getBySID(c.sid); ok {
+			s.sendReliableText(st, "XFER_COMMIT")
+		}
 	}
 }
+
+// ---- tiny little-endian helpers (avoid extra deps) ----
+func binaryLEU16(b []byte) uint16 { return uint16(b[0]) | uint16(b[1])<<8 }
+func binaryLEU32(b []byte) uint32 { return uint32(binaryLEU16(b[0:2])) | uint32(binaryLEU16(b[2:4]))<<16 }
+func binaryLEU64(b []byte) uint64 { return uint64(binaryLEU32(b[0:4])) | uint64(binaryLEU32(b[4:8]))<<32 }
