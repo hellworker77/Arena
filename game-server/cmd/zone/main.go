@@ -66,6 +66,8 @@ func main() {
 		TransferTargetZone: target,
 		TransferBoundaryX: boundary,
 		TransferTimeoutTicks: 60,
+		HistoryTicks: 40,
+		RewindMaxTicks: 5,
 	})
 	if err := s.Start(ctx); err != nil { log.Fatalf("zone: %v", err) }
 }

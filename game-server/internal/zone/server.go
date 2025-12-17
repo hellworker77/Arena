@@ -52,6 +52,65 @@ type player struct {
 	pendingEvents []string
 }
 
+type posSample struct {
+	Tick uint32
+	X, Y int16
+}
+
+type posHistory struct {
+	cap int
+	s   []posSample
+}
+
+func newPosHistory(capacity int) *posHistory {
+	if capacity <= 0 { capacity = 40 }
+	return &posHistory{cap: capacity, s: make([]posSample, 0, capacity)}
+}
+
+func (h *posHistory) add(tick uint32, x, y int16) {
+	// keep monotonic by tick
+	if n := len(h.s); n > 0 && h.s[n-1].Tick == tick {
+		h.s[n-1] = posSample{Tick: tick, X: x, Y: y}
+		return
+	}
+	h.s = append(h.s, posSample{Tick: tick, X: x, Y: y})
+	if len(h.s) > h.cap {
+		h.s = h.s[len(h.s)-h.cap:]
+	}
+}
+
+// sampleAt returns position at or before tick (nearest older). If no data, ok=false.
+func (h *posHistory) sampleAt(tick uint32) (x, y int16, ok bool) {
+	if len(h.s) == 0 { return 0,0,false }
+	// if before earliest
+	if tick <= h.s[0].Tick {
+		return h.s[0].X, h.s[0].Y, true
+	}
+	// if after latest
+	last := h.s[len(h.s)-1]
+	if tick >= last.Tick {
+		return last.X, last.Y, true
+	}
+	// binary search for rightmost <= tick
+	lo, hi := 0, len(h.s)-1
+	for lo <= hi {
+		m := (lo+hi)/2
+		if h.s[m].Tick == tick {
+			return h.s[m].X, h.s[m].Y, true
+		}
+		if h.s[m].Tick < tick {
+			lo = m+1
+		} else {
+			hi = m-1
+		}
+	}
+	// hi is last < tick
+	if hi >= 0 && hi < len(h.s) {
+		return h.s[hi].X, h.s[hi].Y, true
+	}
+	return 0,0,false
+}
+
 type pendingTransfer struct {
 	TargetZone shared.ZoneID
 	StartedTick uint32
@@ -76,6 +135,8 @@ func New(cfg Config) *Server {
 	if cfg.SnapshotEveryTicks <= 0 { cfg.SnapshotEveryTicks = 200 } // 10s at 20Hz
 	if cfg.AIBudgetPerTick <= 0 { cfg.AIBudgetPerTick = 200 }
 	if cfg.TransferTimeoutTicks == 0 { cfg.TransferTimeoutTicks = 60 } // 3s at 20Hz
+	if cfg.HistoryTicks <= 0 { cfg.HistoryTicks = 40 }
+	if cfg.RewindMaxTicks == 0 { cfg.RewindMaxTicks = 5 }
 
 	if cfg.Store == nil || cfg.SaveQ == nil {
 		panic("zone: Store and SaveQ required")
@@ -93,6 +154,7 @@ func New(cfg Config) *Server {
 		grid: spatial.New(cfg.CellSize),
 		players: make(map[shared.SessionID]*player),
 		transferPending: make(map[shared.SessionID]*pendingTransfer),
+		posHist: make(map[shared.EntityID]*posHistory),
 		met: &metrics.Counters{},
 	}
 	return s
@@ -178,6 +240,7 @@ func (s *Server) handleFrame(ctx context.Context, fr wire.Frame) {
 		s.mu.Lock()
 		if _, ok := s.players[sid]; !ok {
 			eid := s.world.Spawn(wire.KindPlayer, cid, x, y)
+			s.posHist[eid] = newPosHistory(s.cfg.HistoryTicks)
 			s.world.HP[eid] = hp
 			s.players[sid] = &player{
 				SID: sid, CID: cid, EID: eid,
@@ -188,7 +251,7 @@ func (s *Server) handleFrame(ctx context.Context, fr wire.Frame) {
 				pendingEvents: []string{"entered zone"},
 			}
 			// spawn some NPCs around on first attach to show AI/combat
-			_ = s.world.RandomNearbyNPCSpawn(x, y, 3)
+			for _, ne := range s.world.RandomNearbyNPCSpawn(x, y, 3) { s.posHist[ne] = newPosHistory(s.cfg.HistoryTicks) }
 		}
 		s.mu.Unlock()
 		_ = wire.WriteFrame(s.w, wire.MsgAttachAck, nil)
@@ -234,8 +297,22 @@ func (s *Server) handleFrame(ctx context.Context, fr wire.Frame) {
 			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadAction, "unknown skill"))
 			return
 		}
-		ok, reason := s.world.ResolveSkill1(p.EID, target, s.serverTick)
-		if ok {
+		// Step24: lag compensation - use client-provided action tick as claimed server tick
+actionTick := tick
+if actionTick == 0 || actionTick > s.serverTick || (s.serverTick-actionTick) > s.cfg.RewindMaxTicks {
+	s.mu.Unlock()
+	_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadAction, "bad action tick"))
+	return
+}
+ax, ay, okA := s.posAtLocked(p.EID, actionTick)
+tx, ty, okT := s.posAtLocked(target, actionTick)
+if !okA || !okT {
+	s.mu.Unlock()
+	_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadAction, "no history"))
+	return
+}
+ok, reason := s.world.ResolveSkill1At(p.EID, target, s.serverTick, ax, ay, tx, ty)
+if ok {
 			p.pendingEvents = append(p.pendingEvents, "hit")
 		} else {
 			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(reason, "action rejected"))
@@ -281,6 +358,7 @@ func (s *Server) attachFromStore(ctx context.Context, sid shared.SessionID, cid 
 	}
 
 	eid := s.world.Spawn(wire.KindPlayer, cid, base.X, base.Y)
+	s.posHist[eid] = newPosHistory(s.cfg.HistoryTicks)
 	s.world.HP[eid] = base.HP
 
 	if interest == 0 {
@@ -294,7 +372,7 @@ func (s *Server) attachFromStore(ctx context.Context, sid shared.SessionID, cid 
 		lastSentHP: make(map[shared.EntityID]uint16),
 		pendingEvents: []string{"welcome"},
 	}
-	_ = s.world.RandomNearbyNPCSpawn(base.X, base.Y, 3)
+	for _, ne := range s.world.RandomNearbyNPCSpawn(base.X, base.Y, 3) { s.posHist[ne] = newPosHistory(s.cfg.HistoryTicks) }
 }
 
 func (s *Server) detachLocked(sid shared.SessionID, why string) {
@@ -304,6 +382,7 @@ func (s *Server) detachLocked(sid shared.SessionID, why string) {
 	// persist (enqueue only)
 	s.enqueueCharacterLocked(p.CID, eid)
 	s.world.Despawn(eid)
+	delete(s.posHist, eid)
 	delete(s.players, sid)
 	delete(s.transferPending, sid)
 	_ = why
@@ -373,6 +452,7 @@ func (s *Server) loadSnapshotLocked(snap persist.Snapshot) {
 		s.world.VelY[eid] = e.VY
 		s.world.HP[eid] = e.HP
 		s.world.Mask[eid] = wire.InterestMove | wire.InterestState | wire.InterestEvent | wire.InterestCombat
+		s.posHist[eid] = newPosHistory(s.cfg.HistoryTicks)
 	}
 }
 
@@ -416,6 +496,15 @@ func (s *Server) step(ctx context.Context) {
 
 	s.world.StepPhysics()
 	s.rebuildGridLocked()
+// Step24: record position history (after physics)
+for eid := range s.world.Kind {
+	h := s.posHist[eid]
+	if h == nil {
+		h = newPosHistory(s.cfg.HistoryTicks)
+		s.posHist[eid] = h
+	}
+	h.add(s.serverTick, s.world.PosX[eid], s.world.PosY[eid])
+}
 
 	// Step13: handle transfer timeouts (abort)
 	for sid, pt := range s.transferPending {

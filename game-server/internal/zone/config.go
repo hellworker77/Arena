@@ -32,4 +32,8 @@ type Config struct {
 	TransferTargetZone uint32
 	TransferBoundaryX int16
 	TransferTimeoutTicks uint32
+
+	// Step24 lag compensation
+	HistoryTicks int
+	RewindMaxTicks uint32
 }

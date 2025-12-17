@@ -1,30 +1,29 @@
-# MMORPG 2D — Step 23: clock sync + interpolation buffer (client-side)
+# MMORPG 2D — Step 24: server rewind / lag compensation (combat)
 
-Builds on Step 22 (reliable UDP + congestion control) and adds:
+Builds on Step 23 (clock sync + interpolation) and adds **lag compensated combat**.
 
 ## Added
-- Gateway tags every replication line with `serverTick`.
-- Client maintains a **serverTick ↔ local time** mapping (simple sync).
-- Client keeps a per-entity **sample buffer** and renders **interpolated** positions
-  at `now - interpDelay` (default 150ms) to smooth jitter.
+- Zone keeps a **position history buffer** per entity (ring buffer by server tick).
+- Client sends `actionTick` as an **estimated server tick** (based on sync).
+- On `ACT`, the zone validates `actionTick` is within a strict window (default 250ms)
+  and then evaluates melee range using **rewound positions** at that tick.
+- Damage is applied server-side (still authoritative), only the hit test is rewound.
 
-This is intentionally minimal:
-- No fancy drift correction (PLL), no packet timestamp echo, no client-side prediction.
-- But it demonstrates the correct MMO pattern: **buffer + interpolate**, not "render immediately".
+## Why this is mandatory
+Without rewind, the client aims at interpolated (past) positions and the server checks current positions,
+so "I hit" becomes "server says miss" under normal MMO latency.
 
 ## Run
-Same as Step 22.
+Same as Step 23.
 
-Client flags:
+Client:
 ```bash
 go run ./cmd/client -addr 127.0.0.1:7777 -proto 1 -char 1 -interpMs 150 -tickHz 20
 ```
 
-In client:
-- `m dx dy` movement (unreliable)
-- `a skill targetEID` action (reliable)
-- `q` quit
+Try:
+- move until you see NPCs, then `a 1 <npcEID>`
+- you should see reliable `EV hit` and `STAT ... hp=...`
 
-Output:
-- Raw lines are still printed (EV/STAT etc).
-- Interpolated positions print periodically as `RENDER tick=<t> eid=<id> x=<..> y=<..>`.
+Notes:
+- This is a simplified rewind (positions only). Extending to projectiles/abilities needs more state history.

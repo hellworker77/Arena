@@ -111,8 +111,9 @@ func (w *World) WanderNPC(eid shared.EntityID) {
 	w.VelY[eid] = int16(rand.Intn(3) - 1)
 }
 
-// ResolveSkill1: toy melee hit, server-authoritative (Step15)
-func (w *World) ResolveSkill1(attacker, target shared.EntityID, serverTick uint32) (ok bool, reason wire.ErrCode) {
+// ResolveSkill1At: toy melee hit, server-authoritative (Step15+24)
+// Uses positions supplied (possibly rewound). Damage applies to current HP.
+func (w *World) ResolveSkill1At(attacker, target shared.EntityID, serverTick uint32, ax, ay, tx, ty int16) (ok bool, reason wire.ErrCode) {
 	if w.Kind[attacker] != wire.KindPlayer {
 		return false, wire.ErrBadAction
 	}
@@ -122,8 +123,6 @@ func (w *World) ResolveSkill1(attacker, target shared.EntityID, serverTick uint3
 	if serverTick < w.Skill1CD[attacker] {
 		return false, wire.ErrCooldown
 	}
-	ax, ay := w.PosX[attacker], w.PosY[attacker]
-	tx, ty := w.PosX[target], w.PosY[target]
 	if !within(ax, ay, tx, ty, 4) { // melee range
 		return false, wire.ErrOutOfRange
 	}

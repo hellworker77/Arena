@@ -49,6 +49,7 @@ func main() {
 	fmt.Println("  q")
 
 	in := bufio.NewScanner(os.Stdin)
+	// tick values are estimated server ticks (Step24)
 	var tick uint32 = 1
 	for {
 		fmt.Print("> ")
@@ -63,21 +64,21 @@ func main() {
 			dx, _ := strconv.Atoi(parts[1])
 			dy, _ := strconv.Atoi(parts[2])
 			pl := make([]byte, 8)
+			tick = state.estimatedServerTickNow()
 			putU32(pl[0:4], tick)
 			putU16(pl[4:6], uint16(int16(dx)))
 			putU16(pl[6:8], uint16(int16(dy)))
 			state.sendUnreliable(gateway.PInput, pl)
-			tick++
 		case "a":
 			if len(parts) != 3 { fmt.Println("usage: a skill targetEID"); continue }
 			skill, _ := strconv.Atoi(parts[1])
 			target, _ := strconv.Atoi(parts[2])
 			pl := make([]byte, 10)
+			tick = state.estimatedServerTickNow()
 			putU32(pl[0:4], tick)
 			putU16(pl[4:6], uint16(skill))
 			putU32(pl[6:10], uint32(target))
 			state.sendReliable(gateway.PAction, pl)
-			tick++
 		default:
 			fmt.Println("unknown")
 		}
