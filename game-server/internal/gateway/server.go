@@ -1,0 +1,252 @@
+package gateway
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"log"
+	"net"
+	"sync"
+	"time"
+
+	"game-server/internal/shared"
+	"game-server/internal/shared/wire"
+)
+
+type Server struct {
+	cfg Config
+
+	udpConn *net.UDPConn
+
+	zoneMu sync.Mutex
+	zoneW  *bufio.Writer
+	zoneR  *bufio.Reader
+	zoneC  net.Conn
+
+	sessionsMu sync.Mutex
+	sessions   map[string]*sessionState // key = remote addr string
+}
+
+type sessionState struct {
+	SID       shared.SessionID
+	CharID    shared.CharacterID
+	ZoneID    shared.ZoneID
+	LastHeard time.Time
+}
+
+func New(cfg Config) (*Server, error) {
+	if cfg.UDPListenAddr == "" || cfg.ZoneTCPAddr == "" {
+		return nil, errors.New("missing addresses")
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = 30 * time.Second
+	}
+	return &Server{
+		cfg:      cfg,
+		sessions: make(map[string]*sessionState),
+	}, nil
+}
+
+func (s *Server) Start(ctx context.Context) error {
+	udpAddr, err := net.ResolveUDPAddr("udp", s.cfg.UDPListenAddr)
+	if err != nil {
+		return err
+	}
+	s.udpConn, err = net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return err
+	}
+	defer s.udpConn.Close()
+
+	if err := s.connectZone(); err != nil {
+		return err
+	}
+	defer s.closeZone()
+
+	go s.zoneReadLoop(ctx)
+	go s.cleanupLoop(ctx)
+
+	log.Printf("gateway up: udp=%s zone=%s", s.cfg.UDPListenAddr, s.cfg.ZoneTCPAddr)
+
+	buf := make([]byte, 2048)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+		_ = s.udpConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, raddr, err := s.udpConn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return err
+		}
+		s.handleUDPPacket(raddr, buf[:n])
+	}
+}
+
+func (s *Server) connectZone() error {
+	c, err := net.Dial("tcp", s.cfg.ZoneTCPAddr)
+	if err != nil {
+		return err
+	}
+	s.zoneMu.Lock()
+	s.zoneC = c
+	s.zoneW = bufio.NewWriterSize(c, 64*1024)
+	s.zoneR = bufio.NewReaderSize(c, 64*1024)
+	s.zoneMu.Unlock()
+	return nil
+}
+
+func (s *Server) closeZone() {
+	s.zoneMu.Lock()
+	defer s.zoneMu.Unlock()
+	if s.zoneC != nil {
+		_ = s.zoneC.Close()
+		s.zoneC = nil
+		s.zoneW = nil
+		s.zoneR = nil
+	}
+}
+
+func (s *Server) zoneSend(typ wire.MsgType, payload []byte) error {
+	s.zoneMu.Lock()
+	defer s.zoneMu.Unlock()
+	if s.zoneW == nil {
+		return errors.New("zone link down")
+	}
+	return wire.WriteFrame(s.zoneW, typ, payload)
+}
+
+// UDP demo protocol (strict, no legacy):
+// - "HELLO <charID>" -> create session and attach to zone
+// - "IN <tick> <mx> <my>" -> forward input to zone
+//
+// Replace this with your real gateway handshake/crypto layer.
+func (s *Server) handleUDPPacket(raddr *net.UDPAddr, b []byte) {
+	line := string(b)
+	ra := raddr.String()
+
+	if len(line) >= 5 && line[:5] == "HELLO" {
+		var cid uint64
+		if _, err := sscanf(line, "HELLO %d", &cid); err != nil || cid == 0 {
+			_, _ = s.udpConn.WriteToUDP([]byte("ERR bad hello
+"), raddr)
+			return
+		}
+		st := s.ensureSession(ra, shared.CharacterID(cid))
+		if err := s.zoneSend(wire.MsgAttachPlayer, wire.EncodeAttachPlayer(st.SID, st.CharID, st.ZoneID)); err != nil {
+			_, _ = s.udpConn.WriteToUDP([]byte("ERR zone down
+"), raddr)
+			return
+		}
+		_, _ = s.udpConn.WriteToUDP([]byte("OK "+st.SID.String()+"
+"), raddr)
+		return
+	}
+
+	if len(line) >= 2 && line[:2] == "IN" {
+		var tick uint32
+		var mx, my int16
+		if _, err := sscanf(line, "IN %d %d %d", &tick, &mx, &my); err != nil {
+			_, _ = s.udpConn.WriteToUDP([]byte("ERR bad input
+"), raddr)
+			return
+		}
+		st := s.getSession(ra)
+		if st == nil {
+			_, _ = s.udpConn.WriteToUDP([]byte("ERR no session
+"), raddr)
+			return
+		}
+		st.LastHeard = time.Now()
+		_ = s.zoneSend(wire.MsgPlayerInput, wire.EncodePlayerInput(st.SID, tick, mx, my))
+		return
+	}
+
+	_, _ = s.udpConn.WriteToUDP([]byte("ERR unknown
+"), raddr)
+}
+
+func (s *Server) ensureSession(remote string, cid shared.CharacterID) *sessionState {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	if st, ok := s.sessions[remote]; ok {
+		st.LastHeard = time.Now()
+		return st
+	}
+	st := &sessionState{
+		SID:       shared.NewSessionID(),
+		CharID:    cid,
+		ZoneID:    1,
+		LastHeard: time.Now(),
+	}
+	s.sessions[remote] = st
+	return st
+}
+
+func (s *Server) getSession(remote string) *sessionState {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	return s.sessions[remote]
+}
+
+func (s *Server) cleanupLoop(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			now := time.Now()
+			var toDetach []shared.SessionID
+			s.sessionsMu.Lock()
+			for ra, st := range s.sessions {
+				if now.Sub(st.LastHeard) > s.cfg.IdleTimeout {
+					toDetach = append(toDetach, st.SID)
+					delete(s.sessions, ra)
+				}
+			}
+			s.sessionsMu.Unlock()
+			for _, sid := range toDetach {
+				_ = s.zoneSend(wire.MsgDetachPlayer, wire.EncodeDetachPlayer(sid))
+			}
+		}
+	}
+}
+
+func (s *Server) zoneReadLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		s.zoneMu.Lock()
+		r := s.zoneR
+		s.zoneMu.Unlock()
+		if r == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		fr, err := wire.ReadFrame(r)
+		if err != nil {
+			log.Printf("zone link read error: %v", err)
+			return
+		}
+		switch fr.Type {
+		case wire.MsgAttachAck:
+			// TODO: map to client ack
+		case wire.MsgSnapshot:
+			// TODO: route snapshots to clients (AOI per client lives in zone; gateway just forwards)
+		case wire.MsgError:
+			code, msg, _ := wire.DecodeError(fr.Payload)
+			log.Printf("zone error: code=%d msg=%q", code, msg)
+		default:
+			log.Printf("zone unknown msg type: %d", fr.Type)
+		}
+	}
+}
