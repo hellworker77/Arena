@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"game-server/internal/persist"
 	"game-server/internal/shared"
 	"game-server/internal/shared/wire"
 	"game-server/internal/zone/spatial"
@@ -32,7 +33,10 @@ type entity struct {
 	X, Y int16
 	VX, VY int16
 
-	HP uint16 // toy state
+	HP uint16
+
+	Owner shared.CharacterID // for persistence mapping (one entity = one character in this skeleton)
+	Dirty bool
 }
 
 type player struct {
@@ -46,7 +50,6 @@ type player struct {
 	lastSentPos map[shared.EntityID][2]int16
 	lastSentHP  map[shared.EntityID]uint16
 
-	// event queue (toy)
 	pendingEvents []string
 }
 
@@ -59,6 +62,10 @@ func New(cfg Config) *Server {
 	if cfg.MaxEventEvents <= 0 { cfg.MaxEventEvents = 64 }
 	if cfg.BudgetBytes <= 0 { cfg.BudgetBytes = 900 }
 	if cfg.StateEveryTicks <= 0 { cfg.StateEveryTicks = 5 }
+	if cfg.SaveEveryTicks <= 0 { cfg.SaveEveryTicks = 20 }
+	if cfg.Store == nil || cfg.SaveQ == nil {
+		panic("zone: Store and SaveQ must be provided (strict)")
+	}
 
 	return &Server{
 		cfg:     cfg,
@@ -74,8 +81,8 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil { return err }
 	defer ln.Close()
 
-	log.Printf("zone up: zone=%d listen=%s aoi=%d cell=%d budget=%d stateEvery=%d",
-		s.cfg.ZoneID, s.cfg.ListenAddr, s.cfg.AOIRadius, s.cfg.CellSize, s.cfg.BudgetBytes, s.cfg.StateEveryTicks)
+	log.Printf("zone up: zone=%d listen=%s aoi=%d cell=%d budget=%d stateEvery=%d saveEvery=%d",
+		s.cfg.ZoneID, s.cfg.ListenAddr, s.cfg.AOIRadius, s.cfg.CellSize, s.cfg.BudgetBytes, s.cfg.StateEveryTicks, s.cfg.SaveEveryTicks)
 
 	c, err := ln.Accept()
 	if err != nil { return err }
@@ -100,24 +107,30 @@ func (s *Server) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// best-effort flush on shutdown (enqueue only; queue worker persists)
+			s.enqueueDirtyLocked()
 			return nil
 		case fr, ok := <-inbound:
 			if !ok { return errors.New("gateway link closed") }
-			s.handleFrame(w, fr)
+			s.handleFrame(ctx, w, fr)
 		case <-ticker.C:
-			s.stepAndReplicate(w)
+			s.stepAndReplicate(ctx, w)
 		}
 	}
 }
 
-func (s *Server) allocEntity(x, y int16) shared.EntityID {
+func (s *Server) allocEntityForCharacter(cid shared.CharacterID, base persist.CharacterState) shared.EntityID {
 	eid := s.nextEID
 	s.nextEID++
-	s.ents[eid] = &entity{EID: eid, X: x, Y: y, HP: 100}
+	// if loaded, respect saved coords/hp and zone
+	x, y := base.X, base.Y
+	hp := base.HP
+	if hp == 0 { hp = 100 }
+	s.ents[eid] = &entity{EID: eid, X: x, Y: y, HP: hp, Owner: cid, Dirty: true}
 	return eid
 }
 
-func (s *Server) handleFrame(w *bufio.Writer, fr wire.Frame) {
+func (s *Server) handleFrame(ctx context.Context, w *bufio.Writer, fr wire.Frame) {
 	switch fr.Type {
 	case wire.MsgAttachPlayer:
 		sid, cid, zid, err := wire.DecodeAttachPlayer(fr.Payload)
@@ -125,9 +138,16 @@ func (s *Server) handleFrame(w *bufio.Writer, fr wire.Frame) {
 			_ = wire.WriteFrame(w, wire.MsgError, wire.EncodeError(wire.ErrBadMsg, "bad attach"))
 			return
 		}
+
 		s.mu.Lock()
 		if _, ok := s.players[sid]; !ok {
-			eid := s.allocEntity(int16(int(s.nextEID%50)), int16(int((s.nextEID*3)%50)))
+			// Load persisted state (no disk in tick? this is *not* in tick; it is in inbound loop.
+			// In real MMO you'd still async this; for the skeleton we allow it on attach.
+			base, found, _ := s.cfg.Store.LoadCharacter(ctx, cid)
+			if !found {
+				base = persist.CharacterState{CharacterID: cid, ZoneID: shared.ZoneID(s.cfg.ZoneID), X: int16(int(cid%50)), Y: int16(int((cid*3)%50)), HP: 100}
+			}
+			eid := s.allocEntityForCharacter(cid, base)
 			s.players[sid] = &player{
 				SID: sid, CID: cid, EID: eid,
 				known: make(map[shared.EntityID]struct{}),
@@ -145,9 +165,16 @@ func (s *Server) handleFrame(w *bufio.Writer, fr wire.Frame) {
 			_ = wire.WriteFrame(w, wire.MsgError, wire.EncodeError(wire.ErrBadMsg, "bad detach"))
 			return
 		}
+		// Force save on detach (enqueue only)
 		s.mu.Lock()
 		p := s.players[sid]
-		if p != nil { delete(s.ents, p.EID) }
+		if p != nil {
+			if e := s.ents[p.EID]; e != nil {
+				e.Dirty = true
+				s.enqueueCharacterLocked(e, p.CID)
+			}
+			delete(s.ents, p.EID)
+		}
 		delete(s.players, sid)
 		s.mu.Unlock()
 
@@ -173,8 +200,8 @@ func (s *Server) handleFrame(w *bufio.Writer, fr wire.Frame) {
 		if e != nil {
 			e.VX = mx
 			e.VY = my
-			// toy: taking input drains HP a bit (to show state changes)
 			if e.HP > 0 { e.HP-- }
+			e.Dirty = true
 		}
 		s.mu.Unlock()
 	default:
@@ -195,6 +222,7 @@ func (s *Server) stepPhysicsLocked() {
 		if e.VX != 0 || e.VY != 0 {
 			e.X += e.VX
 			e.Y += e.VY
+			e.Dirty = true
 		}
 	}
 }
@@ -204,12 +232,14 @@ type eidDist struct {
 	d2  int32
 }
 
-func (s *Server) stepAndReplicate(w *bufio.Writer) {
+func (s *Server) stepAndReplicate(ctx context.Context, w *bufio.Writer) {
 	s.mu.Lock()
 	s.stepPhysicsLocked()
 	s.rebuildGridLocked()
+
 	tick := s.serverTick
 	sendState := (tick % uint32(s.cfg.StateEveryTicks)) == 0
+	doSave := (tick % uint32(s.cfg.SaveEveryTicks)) == 0
 
 	type perOut struct {
 		sid shared.SessionID
@@ -224,7 +254,6 @@ func (s *Server) stepAndReplicate(w *bufio.Writer) {
 		pe := s.ents[p.EID]
 		if pe == nil { continue }
 
-		// Build candidate list within AOI
 		tmp = tmp[:0]
 		cands := s.grid.QueryCircle(pe.X, pe.Y, s.cfg.AOIRadius, tmp)
 
@@ -244,12 +273,11 @@ func (s *Server) stepAndReplicate(w *bufio.Writer) {
 			return dists[i].d2 < dists[j].d2
 		})
 
-		// Queues (priority already by construction)
 		move := make([]wire.RepEvent, 0, 64)
 		state := make([]wire.RepEvent, 0, 16)
 		ev := make([]wire.RepEvent, 0, 8)
 
-		// 1) event channel: flush queued events first (within cap)
+		// events first
 		if len(p.pendingEvents) > 0 {
 			limit := s.cfg.MaxEventEvents
 			if limit > len(p.pendingEvents) { limit = len(p.pendingEvents) }
@@ -259,7 +287,7 @@ func (s *Server) stepAndReplicate(w *bufio.Writer) {
 			p.pendingEvents = p.pendingEvents[limit:]
 		}
 
-		// 2) despawn (highest move priority)
+		// despawn
 		for eid := range p.known {
 			if _, ok := newSet[eid]; !ok {
 				move = append(move, wire.RepEvent{Op: wire.RepDespawn, EID: eid})
@@ -270,7 +298,7 @@ func (s *Server) stepAndReplicate(w *bufio.Writer) {
 			}
 		}
 
-		// 3) spawn/move (nearest first)
+		// spawn/move
 		if len(move) < s.cfg.MaxMoveEvents {
 			for _, ed := range dists {
 				eid := ed.eid
@@ -292,13 +320,12 @@ func (s *Server) stepAndReplicate(w *bufio.Writer) {
 			}
 		}
 
-		// 4) state channel (less frequent)
+		// state
 		if sendState && len(state) < s.cfg.MaxStateEvents {
 			for _, ed := range dists {
 				eid := ed.eid
 				e := s.ents[eid]
 				if e == nil { continue }
-				// only for known entities (don’t leak state without spawn)
 				if _, ok := p.known[eid]; !ok { continue }
 				prev := p.lastSentHP[eid]
 				if prev != e.HP {
@@ -309,69 +336,83 @@ func (s *Server) stepAndReplicate(w *bufio.Writer) {
 			}
 		}
 
-		// Per-session scheduler: strict byte budget per tick.
-		// Priority: ev -> move -> state.
+		// budget: ev -> move -> state
 		budget := s.cfg.BudgetBytes
-		ev = trimToBudgetEvents(ev, budget, wire.ChanEvent)
-		budget -= estimateEncodedSize(wire.ChanEvent, ev)
+		ev = trimToBudget(ev, budget, wire.ChanEvent)
+		budget -= estimateSize(ev, wire.ChanEvent)
+		move = trimToBudget(move, budget, wire.ChanMove)
+		budget -= estimateSize(move, wire.ChanMove)
+		state = trimToBudget(state, budget, wire.ChanState)
 
-		move = trimToBudgetEvents(move, budget, wire.ChanMove)
-		budget -= estimateEncodedSize(wire.ChanMove, move)
-
-		state = trimToBudgetEvents(state, budget, wire.ChanState)
-
-		if len(ev) > 0 || len(move) > 0 || len(state) > 0 {
-			out = append(out, perOut{sid: p.SID, move: move, state: state, ev: ev})
+		if len(ev)>0 || len(move)>0 || len(state)>0 {
+			out = append(out, perOut{sid: p.SID, ev: ev, move: move, state: state})
 		}
+	}
+
+	// persistence: enqueue dirty characters periodically (enqueue only; no IO here)
+	if doSave {
+		s.enqueueDirtyLocked()
 	}
 	s.mu.Unlock()
 
 	for _, m := range out {
-		if len(m.ev) > 0 {
-			_ = wire.WriteFrame(w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanEvent, m.ev))
-		}
-		if len(m.move) > 0 {
-			_ = wire.WriteFrame(w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanMove, m.move))
-		}
-		if len(m.state) > 0 {
-			_ = wire.WriteFrame(w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanState, m.state))
+		if len(m.ev)>0 { _ = wire.WriteFrame(w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanEvent, m.ev)) }
+		if len(m.move)>0 { _ = wire.WriteFrame(w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanMove, m.move)) }
+		if len(m.state)>0 { _ = wire.WriteFrame(w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanState, m.state)) }
+	}
+	_ = ctx
+}
+
+// Persistence helpers (must be called with s.mu held)
+func (s *Server) enqueueCharacterLocked(e *entity, cid shared.CharacterID) {
+	if e == nil { return }
+	st := persist.CharacterState{
+		CharacterID: cid,
+		ZoneID: shared.ZoneID(s.cfg.ZoneID),
+		X: e.X, Y: e.Y, HP: e.HP,
+		ServerTick: s.serverTick,
+	}
+	s.cfg.SaveQ.Enqueue(st)
+	e.Dirty = false
+}
+
+func (s *Server) enqueueDirtyLocked() {
+	for _, p := range s.players {
+		e := s.ents[p.EID]
+		if e != nil && e.Dirty {
+			s.enqueueCharacterLocked(e, p.CID)
 		}
 	}
 }
 
-// Size estimation (strict upper-ish bound) to enforce budget before encoding.
-// payload overhead per replicate: 16+4+1+2 = 23 bytes
-func estimateEncodedSize(ch wire.RepChannel, evs []wire.RepEvent) int {
+// Budget helpers
+// replicate header: 23 bytes
+func estimateSize(evs []wire.RepEvent, ch wire.RepChannel) int {
 	_ = ch
 	sz := 23
 	for _, e := range evs {
 		switch e.Op {
 		case wire.RepSpawn, wire.RepMove:
-			sz += 1 + 4 + 4
+			sz += 1+4+4
 		case wire.RepDespawn:
-			sz += 1 + 4
+			sz += 1+4
 		case wire.RepStateHP:
-			sz += 1 + 4 + 2
+			sz += 1+4+2
 		case wire.RepEventText:
-			if len(e.Text) > 65535 {
-				sz += 1 + 2 + 65535
-			} else {
-				sz += 1 + 2 + len(e.Text)
-			}
+			l := len(e.Text)
+			if l > 65535 { l = 65535 }
+			sz += 1+2+l
 		}
 	}
 	return sz
 }
 
-func trimToBudgetEvents(evs []wire.RepEvent, budget int, ch wire.RepChannel) []wire.RepEvent {
-	if budget <= 23 { // cannot even fit header
-		return evs[:0]
-	}
-	// greedy: keep prefix until size fits (events are already priority-ordered)
+func trimToBudget(evs []wire.RepEvent, budget int, ch wire.RepChannel) []wire.RepEvent {
+	if budget <= 23 { return evs[:0] }
 	out := evs[:0]
 	for _, e := range evs {
 		out = append(out, e)
-		if estimateEncodedSize(ch, out) > budget {
+		if estimateSize(out, ch) > budget {
 			out = out[:len(out)-1]
 			break
 		}

@@ -9,7 +9,7 @@ import (
 
 var ErrFrameTooLarge = errors.New("wire: frame too large")
 
-const MaxFrameSize = 1 << 20 // 1 MiB
+const MaxFrameSize = 1 << 20
 
 type Frame struct {
 	Type    MsgType

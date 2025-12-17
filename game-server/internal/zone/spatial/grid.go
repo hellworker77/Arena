@@ -24,15 +24,9 @@ func New(cellSize int16) *Grid {
 }
 
 func (g *Grid) Clear() {
-	for k := range g.cells {
-		delete(g.cells, k)
-	}
-	for k := range g.xs {
-		delete(g.xs, k)
-	}
-	for k := range g.ys {
-		delete(g.ys, k)
-	}
+	for k := range g.cells { delete(g.cells, k) }
+	for k := range g.xs { delete(g.xs, k) }
+	for k := range g.ys { delete(g.ys, k) }
 }
 
 func (g *Grid) Insert(eid uint32, x, y int16) {
@@ -44,16 +38,11 @@ func (g *Grid) Insert(eid uint32, x, y int16) {
 
 func (g *Grid) cellOf(x, y int16) CellKey {
 	cs := float64(g.CellSize)
-	return CellKey{
-		X: int32(math.Floor(float64(x) / cs)),
-		Y: int32(math.Floor(float64(y) / cs)),
-	}
+	return CellKey{X: int32(math.Floor(float64(x) / cs)), Y: int32(math.Floor(float64(y) / cs))}
 }
 
 func (g *Grid) QueryCircle(cx, cy, r int16, out []uint32) []uint32 {
-	if r <= 0 {
-		return out
-	}
+	if r <= 0 { return out }
 	minX := int32(math.Floor(float64(cx-r) / float64(g.CellSize)))
 	maxX := int32(math.Floor(float64(cx+r) / float64(g.CellSize)))
 	minY := int32(math.Floor(float64(cy-r) / float64(g.CellSize)))
@@ -64,13 +53,9 @@ func (g *Grid) QueryCircle(cx, cy, r int16, out []uint32) []uint32 {
 		for y := minY; y <= maxY; y++ {
 			ids := g.cells[CellKey{X: x, Y: y}]
 			for _, eid := range ids {
-				ex := int32(g.xs[eid])
-				ey := int32(g.ys[eid])
-				dx := ex - int32(cx)
-				dy := ey - int32(cy)
-				if dx*dx+dy*dy <= rr {
-					out = append(out, eid)
-				}
+				ex := int32(g.xs[eid]); ey := int32(g.ys[eid])
+				dx := ex - int32(cx); dy := ey - int32(cy)
+				if dx*dx+dy*dy <= rr { out = append(out, eid) }
 			}
 		}
 	}
@@ -79,9 +64,6 @@ func (g *Grid) QueryCircle(cx, cy, r int16, out []uint32) []uint32 {
 
 func (g *Grid) GetPos(eid uint32) (x, y int16, ok bool) {
 	x, ok = g.xs[eid]
-	if !ok {
-		return 0, 0, false
-	}
-	y = g.ys[eid]
-	return x, y, true
+	if !ok { return 0,0,false }
+	return x, g.ys[eid], true
 }

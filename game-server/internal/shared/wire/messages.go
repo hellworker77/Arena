@@ -7,7 +7,6 @@ import (
 	"game-server/internal/shared"
 )
 
-// Attach: [sid:16][cid:u64][zid:u32]
 func EncodeAttachPlayer(sid shared.SessionID, cid shared.CharacterID, zid shared.ZoneID) []byte {
 	b := make([]byte, 28)
 	copy(b[0:16], sid[:])
@@ -26,7 +25,6 @@ func DecodeAttachPlayer(b []byte) (sid shared.SessionID, cid shared.CharacterID,
 	return
 }
 
-// Detach: [sid:16]
 func EncodeDetachPlayer(sid shared.SessionID) []byte {
 	b := make([]byte, 16)
 	copy(b, sid[:])
@@ -41,7 +39,6 @@ func DecodeDetachPlayer(b []byte) (sid shared.SessionID, err error) {
 	return
 }
 
-// Input: [sid:16][tick:u32][mx:i16][my:i16]
 func EncodePlayerInput(sid shared.SessionID, clientTick uint32, mx, my int16) []byte {
 	b := make([]byte, 24)
 	copy(b[0:16], sid[:])
@@ -62,7 +59,6 @@ func DecodePlayerInput(b []byte) (sid shared.SessionID, tick uint32, mx, my int1
 	return
 }
 
-// Error: [code:u16][msgLen:u16][msgBytes...]
 func EncodeError(code ErrCode, msg string) []byte {
 	if len(msg) > 65535 {
 		msg = msg[:65535]
@@ -89,18 +85,11 @@ func DecodeError(b []byte) (code ErrCode, msg string, err error) {
 type RepEvent struct {
 	Op  RepOp
 	EID shared.EntityID
-	X, Y int16 // for move/spawn
-	Val  uint16 // for state HP (toy)
-	Text string // for event text (toy)
+	X, Y int16
+	Val  uint16
+	Text string
 }
 
-// Replicate: [sid:16][serverTick:u32][chan:u8][n:u16] events...
-//
-// event encodings by op:
-// - RepSpawn/RepMove: [op:u8][eid:u32][x:i16][y:i16]
-// - RepDespawn:       [op:u8][eid:u32]
-// - RepStateHP:       [op:u8][eid:u32][hp:u16]
-// - RepEventText:     [op:u8][len:u16][bytes...]
 func EncodeReplicate(sid shared.SessionID, serverTick uint32, ch RepChannel, events []RepEvent) []byte {
 	if len(events) > 65535 {
 		events = events[:65535]
@@ -115,12 +104,12 @@ func EncodeReplicate(sid shared.SessionID, serverTick uint32, ch RepChannel, eve
 		case RepStateHP:
 			sz += 1 + 4 + 2
 		case RepEventText:
-			if len(e.Text) > 65535 {
-				e.Text = e.Text[:65535]
+			txt := e.Text
+			if len(txt) > 65535 {
+				txt = txt[:65535]
 			}
-			sz += 1 + 2 + len(e.Text)
+			sz += 1 + 2 + len(txt)
 		default:
-			// unknown op: omit (strict); caller should not send
 		}
 	}
 	b := make([]byte, sz)
@@ -174,36 +163,25 @@ func DecodeReplicate(b []byte) (sid shared.SessionID, serverTick uint32, ch RepC
 		op := RepOp(b[off]); off++
 		switch op {
 		case RepSpawn, RepMove:
-			if off+4+4 > len(b) {
-				return sid, 0, 0, nil, errors.New("bad replicate payload length")
-			}
+			if off+8 > len(b) { return sid, 0, 0, nil, errors.New("bad replicate payload length") }
 			eid := shared.EntityID(binary.LittleEndian.Uint32(b[off:off+4])); off += 4
 			x := int16(binary.LittleEndian.Uint16(b[off:off+2]))
-			y := int16(binary.LittleEndian.Uint16(b[off+2:off+4]))
-			off += 4
+			y := int16(binary.LittleEndian.Uint16(b[off+2:off+4])); off += 4
 			events = append(events, RepEvent{Op: op, EID: eid, X: x, Y: y})
 		case RepDespawn:
-			if off+4 > len(b) {
-				return sid, 0, 0, nil, errors.New("bad replicate payload length")
-			}
+			if off+4 > len(b) { return sid, 0, 0, nil, errors.New("bad replicate payload length") }
 			eid := shared.EntityID(binary.LittleEndian.Uint32(b[off:off+4])); off += 4
 			events = append(events, RepEvent{Op: op, EID: eid})
 		case RepStateHP:
-			if off+4+2 > len(b) {
-				return sid, 0, 0, nil, errors.New("bad replicate payload length")
-			}
+			if off+6 > len(b) { return sid, 0, 0, nil, errors.New("bad replicate payload length") }
 			eid := shared.EntityID(binary.LittleEndian.Uint32(b[off:off+4])); off += 4
 			hp := binary.LittleEndian.Uint16(b[off:off+2]); off += 2
 			events = append(events, RepEvent{Op: op, EID: eid, Val: hp})
 		case RepEventText:
-			if off+2 > len(b) {
-				return sid, 0, 0, nil, errors.New("bad replicate payload length")
-			}
+			if off+2 > len(b) { return sid, 0, 0, nil, errors.New("bad replicate payload length") }
 			l := int(binary.LittleEndian.Uint16(b[off:off+2])); off += 2
-			if off+l > len(b) {
-				return sid, 0, 0, nil, errors.New("bad replicate payload length")
-			}
-			txt := string(b[off : off+l]); off += l
+			if off+l > len(b) { return sid, 0, 0, nil, errors.New("bad replicate payload length") }
+			txt := string(b[off:off+l]); off += l
 			events = append(events, RepEvent{Op: op, Text: txt})
 		default:
 			return sid, 0, 0, nil, errors.New("unknown replicate op")

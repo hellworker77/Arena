@@ -1,23 +1,18 @@
-# MMORPG 2D Step 10 — Replication channels + per-session scheduler (no legacy)
+# MMORPG 2D Step 11 — Persistence without killing the tick (async save queue)
 
-Builds on Step 9:
-- Replication is split into **channels**:
-  - Movement (frequent, small)
-  - State (less frequent)
-  - Event (immediate)
-- Zone has a strict **per-session budget scheduler** per tick:
-  - Spawn/Despawn always highest priority
-  - Then movement updates
-  - Then state updates (only on `STATE_EVERY_TICKS`)
-  - Event queue flushes first (within budget)
+Builds on Step 10 (channels + budget scheduler) and adds **strict persistence**:
+- Zone never writes to disk/DB from the tick.
+- Dirty character state is queued into a **SaveQueue** worker.
+- Periodic autosave + forced save on detach.
+- Simple JSON-file store provided as a placeholder (replace with DB).
 
-Gateway still forwards as plaintext demo messages.
+No legacy. The queue has bounded memory (drops/merges by CharacterID, never blocks the tick).
 
 ## Run locally
 
 Terminal A (zone):
 ```bash
-go run ./cmd/zone -listen 127.0.0.1:4000 -zone 1 -aoi 25 -cell 8 -budget 900 -stateEvery 5
+go run ./cmd/zone -listen 127.0.0.1:4000 -zone 1 -aoi 25 -cell 8 -budget 900 -stateEvery 5 -saveEvery 20 -store ./data
 ```
 
 Terminal B (gateway):
@@ -25,18 +20,5 @@ Terminal B (gateway):
 go run ./cmd/gateway -udp :7777 -zone 127.0.0.1:4000
 ```
 
-Client -> gateway (UDP plaintext demo):
-- `HELLO <charID>`
-- `IN <tick> <mx> <my>`
-
-Gateway -> client (UDP plaintext demo):
-- Movement:
-  - `SPAWN <eid> <x> <y>`
-  - `DESPAWN <eid>`
-  - `MOV <eid> <x> <y>`
-- State (toy):
-  - `STAT <eid> hp=<hp>`
-- Events (toy):
-  - `EV <text>`
-
-This is still a skeleton. Your real crypto handshake stays at the gateway.
+- `-saveEvery 20` means every 20 server ticks (at 20Hz => 1s) we enqueue saves for dirty characters.
+- Storage files end up in `./data/char_<id>.json`.
