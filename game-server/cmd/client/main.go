@@ -91,6 +91,8 @@ func (p *clientPeer) ensure() {
 		init: true,
 		nextSeq: 1,
 		pending: make(map[uint32]sent),
+			pendingBytes: 0,
+			maxPendingBytes: 65536,
 		recvMax: 0,
 		recvMask: 0,
 		rto: 200*time.Millisecond,
@@ -117,7 +119,12 @@ func (p *clientPeer) sendReliable(ptype uint8, payload []byte) {
 		Seq: seq, Ack: p.peer.recvMax, AckBits: p.peer.recvMask,
 		Payload: payload,
 	}, nil)
-	p.peer.pending[seq] = sent{pkt: pkt, sentAt: time.Now(), retries: 0}
+	if p.peer.pendingBytes+len(pkt) > p.peer.maxPendingBytes {
+			fmt.Println("reliable backlog overflow (client)")
+			return
+		}
+		p.peer.pending[seq] = sent{pkt: pkt, sentAt: time.Now(), retries: 0}
+		p.peer.pendingBytes += len(pkt)
 	_, _ = p.c.Write(pkt)
 }
 
@@ -176,6 +183,8 @@ type gatewayPeer struct {
 	init bool
 	nextSeq uint32
 	pending map[uint32]sent
+	pendingBytes int
+	maxPendingBytes int
 
 	recvMax uint32
 	recvMask uint32
@@ -212,6 +221,8 @@ func ackedBy(ack uint32, ackBits uint32, seq uint32) bool {
 func (p *gatewayPeer) onAcks(ack uint32, ackBits uint32) {
 	for seq := range p.pending {
 		if ackedBy(ack, ackBits, seq) {
+			p.pendingBytes -= len(p.pending[seq].pkt)
+			if p.pendingBytes < 0 { p.pendingBytes = 0 }
 			delete(p.pending, seq)
 		}
 	}

@@ -1,34 +1,21 @@
-# MMORPG 2D — Step 21: reliable channel over UDP (seq/ack/ackbits)
+# MMORPG 2D — Step 22: congestion control + pacing + adaptive RTO
 
-This step replaces the old plaintext UDP demo with a **binary, versioned, reliable UDP layer**
-between **Client <-> Gateway**.
+Builds on Step 21 (reliable UDP seq/ack/ackBits) and adds **production-critical guards**:
 
-Why: for MMO-like gameplay you need reliability for session control and actions:
-- HELLO / attach
-- actions (combat, interactions)
-- optional critical events
-while keeping movement/input **unreliable** for latency.
+## Added
+- **Per-session token bucket** (bytes/sec + burst) for *all* outbound UDP.
+- **Unreliable drop on budget**: replicate lines are dropped when over budget.
+- **Reliable backlog cap**: pending reliable bytes are capped; on overflow the session is dropped (strict).
+- **Adaptive RTO** using RTT samples from ACKed reliable packets (Jacobson/Karels).
+- **Pacing**: retransmits and new reliable sends also respect the token bucket.
 
-## What is reliable here
-- Client->Gateway: HELLO and ACT are sent on Reliable channel (retransmit until ack).
-- Client->Gateway: IN (movement) is Unreliable (no resend).
-- Gateway->Client: critical TEXT events are Reliable (demo); replicate streams remain Unreliable.
-
-## Run (2 zones + gateway + client)
-
-Zone 1:
-```bash
-go run ./cmd/zone -listen 127.0.0.1:4000 -zone 1 -store ./data1 -http :9101
-```
-
-Zone 2:
-```bash
-go run ./cmd/zone -listen 127.0.0.1:4001 -zone 2 -store ./data2 -http :9102
-```
+## Run
+Same as Step 21, plus optional gateway knobs:
 
 Gateway:
 ```bash
-go run ./cmd/gateway -udp :7777 -zone 1=127.0.0.1:4000 -zone 2=127.0.0.1:4001 -proto 1
+go run ./cmd/gateway -udp :7777 -zone 1=127.0.0.1:4000 -zone 2=127.0.0.1:4001 -proto 1 \
+  -rateBps 20000 -burst 40000 -maxReliableBytes 65536
 ```
 
 Client:
@@ -36,11 +23,6 @@ Client:
 go run ./cmd/client -addr 127.0.0.1:7777 -proto 1 -char 1
 ```
 
-In client:
-- WASD-like: type `m dx dy` (e.g. `m 2 0`)
-- action: `a skill targetEID` (e.g. `a 1 1`)
-- quit: `q`
-
 Notes:
-- The reliable layer is a standard UDP pattern: `seq`, `ack`, `ackBits` (32-bit window).
-- This is still a skeleton: no encryption, no congestion control, no compression.
+- This is still a skeleton: no CC like BBR/CUBIC, no encryption, no compression.
+- But these guards prevent the classic "reliable UDP melts under loss" failure mode.

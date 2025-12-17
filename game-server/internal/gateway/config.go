@@ -8,4 +8,8 @@ type Config struct {
 	IdleTimeout   time.Duration
 	ProtoVersion  uint16
 	TransferTimeout time.Duration
+
+	RateBytesPerSec int
+	BurstBytes       int
+	MaxReliableBytes int
 }

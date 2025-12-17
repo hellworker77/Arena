@@ -47,6 +47,7 @@ type sessionState struct {
 
 	peer *reliablePeer
 	raddr *net.UDPAddr
+	bucket tokenBucket
 }
 
 type xferState struct {
@@ -54,6 +55,41 @@ type xferState struct {
 	To shared.ZoneID
 	Started time.Time
 }
+
+type tokenBucket struct {
+	rate  int // bytes/sec
+	burst int // max tokens
+	tokens int
+	last time.Time
+}
+
+func newBucket(rate, burst int) tokenBucket {
+	if rate <= 0 { rate = 20000 }
+	if burst <= 0 { burst = rate * 2 }
+	now := time.Now()
+	return tokenBucket{rate: rate, burst: burst, tokens: burst, last: now}
+}
+
+func (b *tokenBucket) refill(now time.Time) {
+	if b.last.IsZero() { b.last = now }
+	d := now.Sub(b.last)
+	if d <= 0 { return }
+	add := int(float64(b.rate) * d.Seconds())
+	if add > 0 {
+		b.tokens += add
+		if b.tokens > b.burst { b.tokens = b.burst }
+		b.last = now
+	}
+}
+
+func (b *tokenBucket) take(now time.Time, n int) bool {
+	b.refill(now)
+	if n <= 0 { return true }
+	if b.tokens < n { return false }
+	b.tokens -= n
+	return true
+}
+
 
 func New(cfg Config) (*Server, error) {
 	if cfg.UDPListenAddr == "" { return nil, errors.New("missing udp addr") }
@@ -151,7 +187,7 @@ func (s *Server) handleUDPPacket(raddr *net.UDPAddr, b []byte) {
 	st := s.getOrCreate(remote, raddr, p.Proto)
 
 	// Process ACKs for reliable channel (both on any packet)
-	st.peer.onAcks(p.Ack, p.AckBits)
+	st.peer.onAcks(time.Now(), p.Ack, p.AckBits)
 
 	// Update receive window if incoming is reliable
 	if p.Chan == ChanReliable {
@@ -223,8 +259,9 @@ func (s *Server) getOrCreate(remote string, raddr *net.UDPAddr, proto uint16) *s
 		Interest: 0,
 		LastHeard: time.Now(),
 		Proto: proto,
-		peer: newPeer(),
+		peer: newPeer(s.cfg.MaxReliableBytes),
 		raddr: raddr,
+		bucket: newBucket(s.cfg.RateBytesPerSec, s.cfg.BurstBytes),
 	}
 	s.byRemote[remote] = st
 	s.bySID[st.SID] = remote
@@ -469,6 +506,24 @@ func (s *Server) tryCommitOnAttachAck(ackZoneID uint32) {
 			s.sendReliableText(st, "XFER_COMMIT")
 		}
 	}
+}
+
+func (s *Server) dropSession(st *sessionState, why string) {
+	if st == nil {
+		return
+	}
+	log.Printf("drop session sid=%s why=%s", st.SID.String(), why)
+	// best-effort detach from zone
+	if st.ZoneID != 0 {
+		_ = s.zoneSend(uint32(st.ZoneID), wire.MsgDetachPlayer, wire.EncodeDetachPlayer(st.SID))
+	}
+	// remove from maps
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	if st.raddr != nil {
+		delete(s.byRemote, st.raddr.String())
+	}
+	delete(s.bySID, st.SID)
 }
 
 // ---- tiny little-endian helpers (avoid extra deps) ----
