@@ -7,9 +7,9 @@ import (
 	"game-server/internal/shared"
 )
 
-// MsgAttachPlayer payload: [sessionID:16][characterID:uint64][zoneID:uint32]
+// Attach: [sid:16][cid:u64][zid:u32]
 func EncodeAttachPlayer(sid shared.SessionID, cid shared.CharacterID, zid shared.ZoneID) []byte {
-	b := make([]byte, 16+8+4)
+	b := make([]byte, 28)
 	copy(b[0:16], sid[:])
 	binary.LittleEndian.PutUint64(b[16:24], uint64(cid))
 	binary.LittleEndian.PutUint32(b[24:28], uint32(zid))
@@ -26,7 +26,7 @@ func DecodeAttachPlayer(b []byte) (sid shared.SessionID, cid shared.CharacterID,
 	return
 }
 
-// MsgDetachPlayer payload: [sessionID:16]
+// Detach: [sid:16]
 func EncodeDetachPlayer(sid shared.SessionID) []byte {
 	b := make([]byte, 16)
 	copy(b, sid[:])
@@ -41,9 +41,9 @@ func DecodeDetachPlayer(b []byte) (sid shared.SessionID, err error) {
 	return
 }
 
-// MsgPlayerInput payload: [sessionID:16][clientTick:uint32][mx:int16][my:int16]
+// Input: [sid:16][tick:u32][mx:i16][my:i16]
 func EncodePlayerInput(sid shared.SessionID, clientTick uint32, mx, my int16) []byte {
-	b := make([]byte, 16+4+2+2)
+	b := make([]byte, 24)
 	copy(b[0:16], sid[:])
 	binary.LittleEndian.PutUint32(b[16:20], clientTick)
 	binary.LittleEndian.PutUint16(b[20:22], uint16(mx))
@@ -62,12 +62,12 @@ func DecodePlayerInput(b []byte) (sid shared.SessionID, tick uint32, mx, my int1
 	return
 }
 
-// MsgError payload: [code:uint16][msgLen:uint16][msgBytes...]
+// Error: [code:u16][msgLen:u16][msgBytes...]
 func EncodeError(code ErrCode, msg string) []byte {
 	if len(msg) > 65535 {
 		msg = msg[:65535]
 	}
-	b := make([]byte, 2+2+len(msg))
+	b := make([]byte, 4+len(msg))
 	binary.LittleEndian.PutUint16(b[0:2], uint16(code))
 	binary.LittleEndian.PutUint16(b[2:4], uint16(len(msg)))
 	copy(b[4:], []byte(msg))
@@ -83,44 +83,134 @@ func DecodeError(b []byte) (code ErrCode, msg string, err error) {
 	if len(b) != 4+n {
 		return ErrUnknown, "", errors.New("bad error payload length")
 	}
-	msg = string(b[4:])
-	return
+	return code, string(b[4:]), nil
 }
 
-// MsgSnapshot payload (toy): [serverTick:uint32][entityCount:uint16] repeated: [x:int16][y:int16]
-func EncodeSnapshot(serverTick uint32, positions [][2]int16) []byte {
-	if len(positions) > 65535 {
-		positions = positions[:65535]
+type RepEvent struct {
+	Op  RepOp
+	EID shared.EntityID
+	X, Y int16 // for move/spawn
+	Val  uint16 // for state HP (toy)
+	Text string // for event text (toy)
+}
+
+// Replicate: [sid:16][serverTick:u32][chan:u8][n:u16] events...
+//
+// event encodings by op:
+// - RepSpawn/RepMove: [op:u8][eid:u32][x:i16][y:i16]
+// - RepDespawn:       [op:u8][eid:u32]
+// - RepStateHP:       [op:u8][eid:u32][hp:u16]
+// - RepEventText:     [op:u8][len:u16][bytes...]
+func EncodeReplicate(sid shared.SessionID, serverTick uint32, ch RepChannel, events []RepEvent) []byte {
+	if len(events) > 65535 {
+		events = events[:65535]
 	}
-	b := make([]byte, 4+2+len(positions)*4)
-	binary.LittleEndian.PutUint32(b[0:4], serverTick)
-	binary.LittleEndian.PutUint16(b[4:6], uint16(len(positions)))
-	off := 6
-	for _, p := range positions {
-		binary.LittleEndian.PutUint16(b[off:off+2], uint16(p[0]))
-		binary.LittleEndian.PutUint16(b[off+2:off+4], uint16(p[1]))
-		off += 4
+	sz := 16 + 4 + 1 + 2
+	for _, e := range events {
+		switch e.Op {
+		case RepSpawn, RepMove:
+			sz += 1 + 4 + 4
+		case RepDespawn:
+			sz += 1 + 4
+		case RepStateHP:
+			sz += 1 + 4 + 2
+		case RepEventText:
+			if len(e.Text) > 65535 {
+				e.Text = e.Text[:65535]
+			}
+			sz += 1 + 2 + len(e.Text)
+		default:
+			// unknown op: omit (strict); caller should not send
+		}
+	}
+	b := make([]byte, sz)
+	copy(b[0:16], sid[:])
+	binary.LittleEndian.PutUint32(b[16:20], serverTick)
+	b[20] = byte(ch)
+	binary.LittleEndian.PutUint16(b[21:23], uint16(len(events)))
+	off := 23
+	for _, e := range events {
+		switch e.Op {
+		case RepSpawn, RepMove:
+			b[off] = byte(e.Op); off++
+			binary.LittleEndian.PutUint32(b[off:off+4], uint32(e.EID)); off += 4
+			binary.LittleEndian.PutUint16(b[off:off+2], uint16(e.X))
+			binary.LittleEndian.PutUint16(b[off+2:off+4], uint16(e.Y))
+			off += 4
+		case RepDespawn:
+			b[off] = byte(e.Op); off++
+			binary.LittleEndian.PutUint32(b[off:off+4], uint32(e.EID)); off += 4
+		case RepStateHP:
+			b[off] = byte(e.Op); off++
+			binary.LittleEndian.PutUint32(b[off:off+4], uint32(e.EID)); off += 4
+			binary.LittleEndian.PutUint16(b[off:off+2], e.Val); off += 2
+		case RepEventText:
+			txt := e.Text
+			if len(txt) > 65535 {
+				txt = txt[:65535]
+			}
+			b[off] = byte(e.Op); off++
+			binary.LittleEndian.PutUint16(b[off:off+2], uint16(len(txt))); off += 2
+			copy(b[off:], []byte(txt)); off += len(txt)
+		}
 	}
 	return b
 }
 
-func DecodeSnapshot(b []byte) (serverTick uint32, positions [][2]int16, err error) {
-	if len(b) < 6 {
-		return 0, nil, errors.New("bad snapshot payload")
+func DecodeReplicate(b []byte) (sid shared.SessionID, serverTick uint32, ch RepChannel, events []RepEvent, err error) {
+	if len(b) < 23 {
+		return sid, 0, 0, nil, errors.New("bad replicate payload")
 	}
-	serverTick = binary.LittleEndian.Uint32(b[0:4])
-	n := int(binary.LittleEndian.Uint16(b[4:6]))
-	expect := 6 + n*4
-	if len(b) != expect {
-		return 0, nil, errors.New("bad snapshot payload length")
-	}
-	positions = make([][2]int16, n)
-	off := 6
+	copy(sid[:], b[0:16])
+	serverTick = binary.LittleEndian.Uint32(b[16:20])
+	ch = RepChannel(b[20])
+	n := int(binary.LittleEndian.Uint16(b[21:23]))
+	off := 23
+	events = make([]RepEvent, 0, n)
 	for i := 0; i < n; i++ {
-		x := int16(binary.LittleEndian.Uint16(b[off : off+2]))
-		y := int16(binary.LittleEndian.Uint16(b[off+2 : off+4]))
-		positions[i] = [2]int16{x, y}
-		off += 4
+		if off+1 > len(b) {
+			return sid, 0, 0, nil, errors.New("bad replicate payload length")
+		}
+		op := RepOp(b[off]); off++
+		switch op {
+		case RepSpawn, RepMove:
+			if off+4+4 > len(b) {
+				return sid, 0, 0, nil, errors.New("bad replicate payload length")
+			}
+			eid := shared.EntityID(binary.LittleEndian.Uint32(b[off:off+4])); off += 4
+			x := int16(binary.LittleEndian.Uint16(b[off:off+2]))
+			y := int16(binary.LittleEndian.Uint16(b[off+2:off+4]))
+			off += 4
+			events = append(events, RepEvent{Op: op, EID: eid, X: x, Y: y})
+		case RepDespawn:
+			if off+4 > len(b) {
+				return sid, 0, 0, nil, errors.New("bad replicate payload length")
+			}
+			eid := shared.EntityID(binary.LittleEndian.Uint32(b[off:off+4])); off += 4
+			events = append(events, RepEvent{Op: op, EID: eid})
+		case RepStateHP:
+			if off+4+2 > len(b) {
+				return sid, 0, 0, nil, errors.New("bad replicate payload length")
+			}
+			eid := shared.EntityID(binary.LittleEndian.Uint32(b[off:off+4])); off += 4
+			hp := binary.LittleEndian.Uint16(b[off:off+2]); off += 2
+			events = append(events, RepEvent{Op: op, EID: eid, Val: hp})
+		case RepEventText:
+			if off+2 > len(b) {
+				return sid, 0, 0, nil, errors.New("bad replicate payload length")
+			}
+			l := int(binary.LittleEndian.Uint16(b[off:off+2])); off += 2
+			if off+l > len(b) {
+				return sid, 0, 0, nil, errors.New("bad replicate payload length")
+			}
+			txt := string(b[off : off+l]); off += l
+			events = append(events, RepEvent{Op: op, Text: txt})
+		default:
+			return sid, 0, 0, nil, errors.New("unknown replicate op")
+		}
+	}
+	if off != len(b) {
+		return sid, 0, 0, nil, errors.New("extra bytes in replicate payload")
 	}
 	return
 }

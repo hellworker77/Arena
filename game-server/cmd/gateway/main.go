@@ -30,7 +30,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("gateway init: %v", err)
 	}
-
 	if err := srv.Start(ctx); err != nil {
 		log.Fatalf("gateway: %v", err)
 	}

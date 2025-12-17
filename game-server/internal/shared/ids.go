@@ -9,6 +9,7 @@ type AccountID uint64
 type CharacterID uint64
 type SessionID [16]byte
 type ZoneID uint32
+type EntityID uint32
 
 func NewSessionID() SessionID {
 	var id SessionID

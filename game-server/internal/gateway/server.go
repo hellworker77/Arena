@@ -24,7 +24,8 @@ type Server struct {
 	zoneC  net.Conn
 
 	sessionsMu sync.Mutex
-	sessions   map[string]*sessionState // key = remote addr string
+	byRemote   map[string]*sessionState
+	bySID      map[shared.SessionID]string
 }
 
 type sessionState struct {
@@ -43,7 +44,8 @@ func New(cfg Config) (*Server, error) {
 	}
 	return &Server{
 		cfg:      cfg,
-		sessions: make(map[string]*sessionState),
+		byRemote: make(map[string]*sessionState),
+		bySID:    make(map[shared.SessionID]string),
 	}, nil
 }
 
@@ -121,10 +123,8 @@ func (s *Server) zoneSend(typ wire.MsgType, payload []byte) error {
 }
 
 // UDP demo protocol (strict, no legacy):
-// - "HELLO <charID>" -> create session and attach to zone
-// - "IN <tick> <mx> <my>" -> forward input to zone
-//
-// Replace this with your real gateway handshake/crypto layer.
+// - "HELLO <charID>"
+// - "IN <tick> <mx> <my>"
 func (s *Server) handleUDPPacket(raddr *net.UDPAddr, b []byte) {
 	line := string(b)
 	ra := raddr.String()
@@ -155,7 +155,7 @@ func (s *Server) handleUDPPacket(raddr *net.UDPAddr, b []byte) {
 "), raddr)
 			return
 		}
-		st := s.getSession(ra)
+		st := s.getByRemote(ra)
 		if st == nil {
 			_, _ = s.udpConn.WriteToUDP([]byte("ERR no session
 "), raddr)
@@ -173,7 +173,7 @@ func (s *Server) handleUDPPacket(raddr *net.UDPAddr, b []byte) {
 func (s *Server) ensureSession(remote string, cid shared.CharacterID) *sessionState {
 	s.sessionsMu.Lock()
 	defer s.sessionsMu.Unlock()
-	if st, ok := s.sessions[remote]; ok {
+	if st, ok := s.byRemote[remote]; ok {
 		st.LastHeard = time.Now()
 		return st
 	}
@@ -183,14 +183,22 @@ func (s *Server) ensureSession(remote string, cid shared.CharacterID) *sessionSt
 		ZoneID:    1,
 		LastHeard: time.Now(),
 	}
-	s.sessions[remote] = st
+	s.byRemote[remote] = st
+	s.bySID[st.SID] = remote
 	return st
 }
 
-func (s *Server) getSession(remote string) *sessionState {
+func (s *Server) getByRemote(remote string) *sessionState {
 	s.sessionsMu.Lock()
 	defer s.sessionsMu.Unlock()
-	return s.sessions[remote]
+	return s.byRemote[remote]
+}
+
+func (s *Server) getRemoteBySID(sid shared.SessionID) (string, bool) {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	ra, ok := s.bySID[sid]
+	return ra, ok
 }
 
 func (s *Server) cleanupLoop(ctx context.Context) {
@@ -204,10 +212,11 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 			now := time.Now()
 			var toDetach []shared.SessionID
 			s.sessionsMu.Lock()
-			for ra, st := range s.sessions {
+			for ra, st := range s.byRemote {
 				if now.Sub(st.LastHeard) > s.cfg.IdleTimeout {
 					toDetach = append(toDetach, st.SID)
-					delete(s.sessions, ra)
+					delete(s.bySID, st.SID)
+					delete(s.byRemote, ra)
 				}
 			}
 			s.sessionsMu.Unlock()
@@ -239,9 +248,51 @@ func (s *Server) zoneReadLoop(ctx context.Context) {
 		}
 		switch fr.Type {
 		case wire.MsgAttachAck:
-			// TODO: map to client ack
-		case wire.MsgSnapshot:
-			// TODO: route snapshots to clients (AOI per client lives in zone; gateway just forwards)
+		case wire.MsgReplicate:
+			sid, _, ch, events, err := wire.DecodeReplicate(fr.Payload)
+			if err != nil {
+				log.Printf("bad replicate frame: %v", err)
+				continue
+			}
+			remote, ok := s.getRemoteBySID(sid)
+			if !ok {
+				continue
+			}
+			raddr, err := net.ResolveUDPAddr("udp", remote)
+			if err != nil {
+				continue
+			}
+			// plaintext forwarding demo
+			switch ch {
+			case wire.ChanMove:
+				for _, ev := range events {
+					switch ev.Op {
+					case wire.RepSpawn:
+						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("SPAWN %d %d %d
+", uint32(ev.EID), ev.X, ev.Y)), raddr)
+					case wire.RepDespawn:
+						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("DESPAWN %d
+", uint32(ev.EID))), raddr)
+					case wire.RepMove:
+						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("MOV %d %d %d
+", uint32(ev.EID), ev.X, ev.Y)), raddr)
+					}
+				}
+			case wire.ChanState:
+				for _, ev := range events {
+					if ev.Op == wire.RepStateHP {
+						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("STAT %d hp=%d
+", uint32(ev.EID), ev.Val)), raddr)
+					}
+				}
+			case wire.ChanEvent:
+				for _, ev := range events {
+					if ev.Op == wire.RepEventText {
+						_, _ = s.udpConn.WriteToUDP([]byte(sprintf("EV %s
+", ev.Text)), raddr)
+					}
+				}
+			}
 		case wire.MsgError:
 			code, msg, _ := wire.DecodeError(fr.Payload)
 			log.Printf("zone error: code=%d msg=%q", code, msg)
