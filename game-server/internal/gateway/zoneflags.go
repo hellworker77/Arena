@@ -28,9 +28,6 @@ func (z ZoneFlags) Set(v string) error {
 	if parts[1] == "" {
 		return fmt.Errorf("missing addr")
 	}
-	if z == nil {
-		return fmt.Errorf("internal: ZoneFlags nil")
-	}
 	z[uint32(idU)] = parts[1]
 	return nil
 }

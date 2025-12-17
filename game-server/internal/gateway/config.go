@@ -6,4 +6,6 @@ type Config struct {
 	UDPListenAddr string
 	Zones         ZoneFlags
 	IdleTimeout   time.Duration
+	ProtoVersion  uint16
+	TransferTimeout time.Duration
 }

@@ -1,39 +1,74 @@
-# MMORPG 2D Step 12 — Zone transfer / handoff (gateway orchestrated)
+# MMORPG 2D — Steps 13 → 20 (sequential, no legacy)
 
-This step adds **cross-zone transfer** (MMO-style sharding/zone boundaries) on top of Step 11:
-- Zone is authoritative and decides when a player must transfer (e.g. crossing a boundary).
-- Zone sends `MsgTransfer` to Gateway with the **character state snapshot**.
-- Gateway detaches from old zone and attaches to target zone using `MsgAttachWithState`.
-- UDP client remains connected to the gateway; only the authoritative zone changes.
+This bundle implements Steps **13–20** in one coherent codebase (so each step builds on the previous cleanly).
+Everything remains a **skeleton** (toy data + plaintext UDP), but the architecture follows modern MMO server practice.
 
-No legacy.
-
-## Run locally (2 zones)
+## How to run (2 zones + gateway)
 
 Terminal A (zone 1):
 ```bash
-go run ./cmd/zone -listen 127.0.0.1:4000 -zone 1 -targetZone 2 -xferBoundary 100 -store ./data1
+go run ./cmd/zone -listen 127.0.0.1:4000 -zone 1 -store ./data1 -http :9101
 ```
 
 Terminal B (zone 2):
 ```bash
-go run ./cmd/zone -listen 127.0.0.1:4001 -zone 2 -targetZone 1 -xferBoundary -100 -store ./data2
+go run ./cmd/zone -listen 127.0.0.1:4001 -zone 2 -store ./data2 -http :9102
 ```
 
 Terminal C (gateway):
 ```bash
-go run ./cmd/gateway -udp :7777 -zone 1=127.0.0.1:4000 -zone 2=127.0.0.1:4001
+go run ./cmd/gateway -udp :7777 -zone 1=127.0.0.1:4000 -zone 2=127.0.0.1:4001 -proto 1
 ```
 
 Client (toy plaintext):
+- `HELLO <proto> <charID>`  (proto must match gateway `-proto`)
+- `IN <tick> <mx> <my>`
+- `ACT <tick> <skill> <targetEID>` (skill=1 is a toy melee hit)
+
+Example:
 ```bash
-echo "HELLO 1" | nc -u -w1 127.0.0.1 7777
-# push right until crossing boundary (mx=2)
-for i in $(seq 1 80); do echo "IN $i 2 0" | nc -u -w1 127.0.0.1 7777; done
+echo "HELLO 1 1" | nc -u -w1 127.0.0.1 7777
+echo "IN 1 2 0" | nc -u -w1 127.0.0.1 7777
+echo "ACT 2 1 1" | nc -u -w1 127.0.0.1 7777
 ```
 
-You should see the gateway logs indicate a transfer, and the client keeps receiving updates.
+## Step index
 
-Notes:
-- This skeleton does not implement cryptographic session migration; keep that at gateway.
-- Real MMO transfer needs ACK/rollback, session token re-issue, and anti-duplication; TODO markers included.
+### Step 13 — **2‑phase zone transfer (prepare/commit/abort)**
+- Zone never deletes the player immediately.
+- Gateway orchestrates:
+  1) `TRANSFER_PREPARE` from old zone
+  2) `ATTACH_WITH_STATE` to target zone
+  3) upon target `ATTACH_ACK` → `TRANSFER_COMMIT` to old zone
+  4) if timeout/failure → `TRANSFER_ABORT` to old zone
+
+### Step 14 — **Ownership + interest layers**
+- Entities have `Kind` and `InterestMask`.
+- Player has `InterestMask`.
+- AOI replication filters by interest layers.
+
+### Step 15 — **Server‑authoritative combat (anti‑cheat)**
+- Client sends `ACT` as an *intent*.
+- Zone validates cooldown + range and applies damage server-side.
+- Results replicated via Event/State (no client-authoritative damage).
+
+### Step 16 — **ECS-ish component split**
+- Position, Velocity, Health, Owner, Kind are stored in separate component stores.
+- Removes the “god struct entity”.
+
+### Step 17 — **AI + simulation budgets**
+- NPCs exist and wander.
+- AI budget per tick, and LOD:
+  - only NPCs near *any* player get updated.
+
+### Step 18 — **Fault tolerance via snapshots**
+- Zone periodically snapshots world + players to disk **asynchronously** (never in the tick).
+- On start, zone loads its snapshot if present.
+
+### Step 19 — **Metrics**
+- Per-zone `/metrics` (Prometheus text format) and `/debug/vars` (expvar).
+- Tick durations, entity counts, replication bytes.
+
+### Step 20 — **Protocol contract**
+- UDP has a strict proto version (`HELLO <proto> <charID>`).
+- Internal wire has an explicit `WireVersion` constant in code + documented message formats.

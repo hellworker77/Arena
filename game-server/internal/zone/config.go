@@ -4,6 +4,8 @@ import "game-server/internal/persist"
 
 type Config struct {
 	ListenAddr string
+	HTTPAddr   string
+
 	ZoneID     uint32
 	TickHz     int
 
@@ -13,13 +15,21 @@ type Config struct {
 	BudgetBytes int
 	StateEveryTicks int
 
+	// persistence
 	SaveEveryTicks int
 	Store persist.Store
 	SaveQ  *persist.SaveQueue
 
-	// Transfer policy (toy boundary-based):
-	// If TransferBoundaryX > 0 => transfer when X > boundary.
-	// If TransferBoundaryX < 0 => transfer when X < boundary.
+	// snapshots
+	SnapshotEveryTicks int
+	SnapshotStore persist.SnapshotStore
+	SnapshotQ *persist.SnapshotQueue
+
+	// AI budget
+	AIBudgetPerTick int
+
+	// transfer (boundary-based toy policy)
 	TransferTargetZone uint32
 	TransferBoundaryX int16
+	TransferTimeoutTicks uint32
 }

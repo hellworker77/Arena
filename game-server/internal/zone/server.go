@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"game-server/internal/metrics"
 	"game-server/internal/persist"
 	"game-server/internal/shared"
 	"game-server/internal/shared/wire"
@@ -19,32 +20,28 @@ import (
 type Server struct {
 	cfg Config
 
-	mu      sync.Mutex
+	mu sync.Mutex
+
+	w *bufio.Writer // gateway link
+
+	world *World
+	grid *spatial.Grid
+	serverTick uint32
+
 	players map[shared.SessionID]*player
-	ents    map[shared.EntityID]*entity
 
-	nextEID     shared.EntityID
-	serverTick  uint32
-	grid        *spatial.Grid
+	// pending transfer prepare waiting for commit/abort (Step13)
+	transferPending map[shared.SessionID]*pendingTransfer
 
-	// gateway link
-	w *bufio.Writer
-}
-
-type entity struct {
-	EID shared.EntityID
-	X, Y int16
-	VX, VY int16
-	HP uint16
-
-	Owner shared.CharacterID
-	Dirty bool
+	met *metrics.Counters
 }
 
 type player struct {
 	SID shared.SessionID
 	CID shared.CharacterID
 	EID shared.EntityID
+
+	Interest wire.InterestMask
 
 	nextClientTick uint32
 
@@ -53,8 +50,20 @@ type player struct {
 	lastSentHP map[shared.EntityID]uint16
 
 	pendingEvents []string
+}
 
-	Transferring bool
+type pendingTransfer struct {
+	TargetZone shared.ZoneID
+	StartedTick uint32
+
+	// snapshot
+	X, Y int16
+	HP uint16
+	Interest wire.InterestMask
+	CID shared.CharacterID
+	EID shared.EntityID
+
+	// freeze movement
 }
 
 func New(cfg Config) *Server {
@@ -64,23 +73,43 @@ func New(cfg Config) *Server {
 	if cfg.BudgetBytes <= 0 { cfg.BudgetBytes = 900 }
 	if cfg.StateEveryTicks <= 0 { cfg.StateEveryTicks = 5 }
 	if cfg.SaveEveryTicks <= 0 { cfg.SaveEveryTicks = 20 }
-	if cfg.TransferTargetZone == 0 {
-		panic("zone: TransferTargetZone must be set (strict)")
-	}
+	if cfg.SnapshotEveryTicks <= 0 { cfg.SnapshotEveryTicks = 200 } // 10s at 20Hz
+	if cfg.AIBudgetPerTick <= 0 { cfg.AIBudgetPerTick = 200 }
+	if cfg.TransferTimeoutTicks == 0 { cfg.TransferTimeoutTicks = 60 } // 3s at 20Hz
+
 	if cfg.Store == nil || cfg.SaveQ == nil {
-		panic("zone: Store and SaveQ must be provided (strict)")
+		panic("zone: Store and SaveQ required")
+	}
+	if cfg.SnapshotStore == nil || cfg.SnapshotQ == nil {
+		panic("zone: SnapshotStore and SnapshotQ required")
+	}
+	if cfg.TransferTargetZone == 0 {
+		panic("zone: TransferTargetZone required")
 	}
 
-	return &Server{
+	s := &Server{
 		cfg: cfg,
-		players: make(map[shared.SessionID]*player),
-		ents: make(map[shared.EntityID]*entity),
-		nextEID: 1,
+		world: NewWorld(),
 		grid: spatial.New(cfg.CellSize),
+		players: make(map[shared.SessionID]*player),
+		transferPending: make(map[shared.SessionID]*pendingTransfer),
+		met: &metrics.Counters{},
 	}
+	return s
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	// Step18: attempt snapshot load before serving
+	if snap, ok, err := s.cfg.SnapshotStore.LoadSnapshot(ctx, s.cfg.ZoneID); err == nil && ok {
+		s.loadSnapshotLocked(snap)
+		log.Printf("zone %d loaded snapshot tick=%d ents=%d", s.cfg.ZoneID, snap.ServerTick, len(snap.Entities))
+	}
+
+	if s.cfg.HTTPAddr != "" {
+		_ = s.met.Serve(s.cfg.HTTPAddr)
+		log.Printf("zone metrics http=%s", s.cfg.HTTPAddr)
+	}
+
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil { return err }
 	defer ln.Close()
@@ -113,88 +142,72 @@ func (s *Server) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			s.mu.Lock()
 			s.enqueueDirtyLocked()
+			s.enqueueSnapshotLocked()
 			s.mu.Unlock()
 			return nil
+
 		case fr, ok := <-inbound:
 			if !ok { return errors.New("gateway link closed") }
 			s.handleFrame(ctx, fr)
+
 		case <-ticker.C:
-			s.stepAndSend(ctx)
+			start := time.Now()
+			s.step(ctx)
+			s.met.ObserveTick(time.Since(start))
 		}
 	}
-}
-
-func (s *Server) allocEntity(cid shared.CharacterID, base persist.CharacterState) shared.EntityID {
-	eid := s.nextEID
-	s.nextEID++
-	hp := base.HP
-	if hp == 0 { hp = 100 }
-	s.ents[eid] = &entity{
-		EID: eid, X: base.X, Y: base.Y, HP: hp,
-		Owner: cid, Dirty: true,
-	}
-	return eid
 }
 
 func (s *Server) handleFrame(ctx context.Context, fr wire.Frame) {
 	switch fr.Type {
 	case wire.MsgAttachPlayer:
-		sid, cid, zid, err := wire.DecodeAttachPlayer(fr.Payload)
+		sid, cid, zid, interest, err := wire.DecodeAttachPlayer(fr.Payload)
 		if err != nil || uint32(zid) != s.cfg.ZoneID {
 			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadMsg, "bad attach"))
 			return
 		}
-		s.attachFromStore(ctx, sid, cid)
+		s.attachFromStore(ctx, sid, cid, interest)
 		_ = wire.WriteFrame(s.w, wire.MsgAttachAck, nil)
 
 	case wire.MsgAttachWithState:
-		sid, cid, zid, x, y, hp, err := wire.DecodeAttachWithState(fr.Payload)
+		sid, cid, zid, interest, x, y, hp, err := wire.DecodeAttachWithState(fr.Payload)
 		if err != nil || uint32(zid) != s.cfg.ZoneID {
 			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadMsg, "bad attach-with-state"))
 			return
 		}
 		s.mu.Lock()
 		if _, ok := s.players[sid]; !ok {
-			base := persist.CharacterState{CharacterID: cid, ZoneID: shared.ZoneID(s.cfg.ZoneID), X: x, Y: y, HP: hp}
-			eid := s.allocEntity(cid, base)
+			eid := s.world.Spawn(wire.KindPlayer, cid, x, y)
+			s.world.HP[eid] = hp
 			s.players[sid] = &player{
 				SID: sid, CID: cid, EID: eid,
+				Interest: interest,
 				known: make(map[shared.EntityID]struct{}),
 				lastSentPos: make(map[shared.EntityID][2]int16),
 				lastSentHP: make(map[shared.EntityID]uint16),
 				pendingEvents: []string{"entered zone"},
 			}
+			// spawn some NPCs around on first attach to show AI/combat
+			_ = s.world.RandomNearbyNPCSpawn(x, y, 3)
 		}
 		s.mu.Unlock()
 		_ = wire.WriteFrame(s.w, wire.MsgAttachAck, nil)
 
 	case wire.MsgDetachPlayer:
 		sid, err := wire.DecodeDetachPlayer(fr.Payload)
-		if err != nil {
-			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadMsg, "bad detach"))
-			return
-		}
+		if err != nil { return }
 		s.mu.Lock()
-		p := s.players[sid]
-		if p != nil {
-			if e := s.ents[p.EID]; e != nil {
-				e.Dirty = true
-				s.enqueueCharacterLocked(e, p.CID)
-				delete(s.ents, p.EID)
-			}
-			delete(s.players, sid)
-		}
+		s.detachLocked(sid, "detach")
 		s.mu.Unlock()
 
 	case wire.MsgPlayerInput:
 		sid, tick, mx, my, err := wire.DecodePlayerInput(fr.Payload)
-		if err != nil {
-			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadMsg, "bad input"))
-			return
-		}
+		if err != nil { return }
 		s.mu.Lock()
 		p := s.players[sid]
-		if p == nil || p.Transferring {
+		if p == nil { s.mu.Unlock(); return }
+		// freeze if transfer pending
+		if _, pending := s.transferPending[sid]; pending {
 			s.mu.Unlock()
 			return
 		}
@@ -203,20 +216,56 @@ func (s *Server) handleFrame(ctx context.Context, fr wire.Frame) {
 			return
 		}
 		p.nextClientTick = tick + 1
-		e := s.ents[p.EID]
-		if e != nil {
-			e.VX = mx; e.VY = my
-			if e.HP > 0 { e.HP-- }
-			e.Dirty = true
+		eid := p.EID
+		s.world.VelX[eid] = mx
+		s.world.VelY[eid] = my
+		s.mu.Unlock()
+
+	case wire.MsgPlayerAction:
+		sid, tick, skill, target, err := wire.DecodePlayerAction(fr.Payload)
+		if err != nil { return }
+		s.mu.Lock()
+		p := s.players[sid]
+		if p == nil { s.mu.Unlock(); return }
+		// strict anti-cheat: use serverTick for cooldown, ignore client tick besides anti-spam window
+		_ = tick
+		if skill != 1 {
+			s.mu.Unlock()
+			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadAction, "unknown skill"))
+			return
+		}
+		ok, reason := s.world.ResolveSkill1(p.EID, target, s.serverTick)
+		if ok {
+			p.pendingEvents = append(p.pendingEvents, "hit")
+		} else {
+			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(reason, "action rejected"))
 		}
 		s.mu.Unlock()
 
+	case wire.MsgTransferCommit:
+		sid, err := wire.DecodeTransferCommit(fr.Payload)
+		if err != nil { return }
+		s.mu.Lock()
+		// finalize: remove player/entity
+		if pt := s.transferPending[sid]; pt != nil {
+			s.detachLocked(sid, "transfer commit")
+			delete(s.transferPending, sid)
+		}
+		s.mu.Unlock()
+
+	case wire.MsgTransferAbort:
+		sid, err := wire.DecodeTransferAbort(fr.Payload)
+		if err != nil { return }
+		s.mu.Lock()
+		// unfreeze by clearing pending; keep player alive
+		delete(s.transferPending, sid)
+		s.mu.Unlock()
+
 	default:
-		_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrBadMsg, "unknown msg type"))
 	}
 }
 
-func (s *Server) attachFromStore(ctx context.Context, sid shared.SessionID, cid shared.CharacterID) {
+func (s *Server) attachFromStore(ctx context.Context, sid shared.SessionID, cid shared.CharacterID, interest wire.InterestMask) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.players[sid]; ok { return }
@@ -231,75 +280,185 @@ func (s *Server) attachFromStore(ctx context.Context, sid shared.SessionID, cid 
 		base.ZoneID = shared.ZoneID(s.cfg.ZoneID)
 	}
 
-	eid := s.allocEntity(cid, base)
+	eid := s.world.Spawn(wire.KindPlayer, cid, base.X, base.Y)
+	s.world.HP[eid] = base.HP
+
+	if interest == 0 {
+		interest = wire.InterestMove | wire.InterestState | wire.InterestEvent | wire.InterestCombat
+	}
 	s.players[sid] = &player{
 		SID: sid, CID: cid, EID: eid,
+		Interest: interest,
 		known: make(map[shared.EntityID]struct{}),
 		lastSentPos: make(map[shared.EntityID][2]int16),
 		lastSentHP: make(map[shared.EntityID]uint16),
 		pendingEvents: []string{"welcome"},
 	}
+	_ = s.world.RandomNearbyNPCSpawn(base.X, base.Y, 3)
+}
+
+func (s *Server) detachLocked(sid shared.SessionID, why string) {
+	p := s.players[sid]
+	if p == nil { return }
+	eid := p.EID
+	// persist (enqueue only)
+	s.enqueueCharacterLocked(p.CID, eid)
+	s.world.Despawn(eid)
+	delete(s.players, sid)
+	delete(s.transferPending, sid)
+	_ = why
+}
+
+func (s *Server) enqueueCharacterLocked(cid shared.CharacterID, eid shared.EntityID) {
+	st := persist.CharacterState{
+		CharacterID: cid,
+		ZoneID: shared.ZoneID(s.cfg.ZoneID),
+		X: s.world.PosX[eid],
+		Y: s.world.PosY[eid],
+		HP: s.world.HP[eid],
+		ServerTick: s.serverTick,
+	}
+	s.cfg.SaveQ.Enqueue(st)
+}
+
+func (s *Server) enqueueDirtyLocked() {
+	for _, p := range s.players {
+		if s.world.Dirty[p.EID] {
+			s.enqueueCharacterLocked(p.CID, p.EID)
+			s.world.Dirty[p.EID] = false
+		}
+	}
+}
+
+func (s *Server) enqueueSnapshotLocked() {
+	// snapshot world (Step18)
+	snap := persist.Snapshot{
+		ZoneID: s.cfg.ZoneID,
+		ServerTick: s.serverTick,
+		Entities: make([]persist.SnapshotEntity, 0, len(s.world.Kind)),
+	}
+	for eid := range s.world.Kind {
+		snap.Entities = append(snap.Entities, persist.SnapshotEntity{
+			EID: uint32(eid),
+			Kind: uint8(s.world.Kind[eid]),
+			Owner: uint64(s.world.Owner[eid]),
+			X: s.world.PosX[eid], Y: s.world.PosY[eid],
+			VX: s.world.VelX[eid], VY: s.world.VelY[eid],
+			HP: s.world.HP[eid],
+		})
+	}
+	s.cfg.SnapshotQ.Enqueue(s.cfg.ZoneID, snap)
+}
+
+func (s *Server) loadSnapshotLocked(snap persist.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if snap.ZoneID != s.cfg.ZoneID {
+		return
+	}
+	s.serverTick = snap.ServerTick
+	// wipe world (players will reattach later; snapshot is just world state)
+	s.world = NewWorld()
+	s.world.NextEID = 1
+	for _, e := range snap.Entities {
+		eid := shared.EntityID(e.EID)
+		if eid >= s.world.NextEID {
+			s.world.NextEID = eid + 1
+		}
+		s.world.Kind[eid] = wire.EntityKind(e.Kind)
+		s.world.Owner[eid] = shared.CharacterID(e.Owner)
+		s.world.PosX[eid] = e.X
+		s.world.PosY[eid] = e.Y
+		s.world.VelX[eid] = e.VX
+		s.world.VelY[eid] = e.VY
+		s.world.HP[eid] = e.HP
+		s.world.Mask[eid] = wire.InterestMove | wire.InterestState | wire.InterestEvent | wire.InterestCombat
+	}
 }
 
 func (s *Server) rebuildGridLocked() {
 	s.grid.Clear()
-	for eid, e := range s.ents {
-		s.grid.Insert(uint32(eid), e.X, e.Y)
+	for eid := range s.world.Kind {
+		s.grid.Insert(uint32(eid), s.world.PosX[eid], s.world.PosY[eid])
 	}
 }
 
-func (s *Server) stepPhysicsLocked() {
+type eidDist struct { eid shared.EntityID; d2 int32 }
+
+func (s *Server) step(ctx context.Context) {
+	s.mu.Lock()
 	s.serverTick++
-	for _, e := range s.ents {
-		if e.VX != 0 || e.VY != 0 {
-			e.X += e.VX
-			e.Y += e.VY
-			e.Dirty = true
+
+	// Step17: AI budget + LOD (only NPCs near any player)
+	aiBudget := s.cfg.AIBudgetPerTick
+	if aiBudget > 0 && len(s.players) > 0 {
+		// build a quick list of player positions
+		playerPos := make([][2]int16, 0, len(s.players))
+		for _, p := range s.players {
+			playerPos = append(playerPos, [2]int16{s.world.PosX[p.EID], s.world.PosY[p.EID]})
+		}
+		for eid, kind := range s.world.Kind {
+			if aiBudget <= 0 { break }
+			if kind != wire.KindNPC { continue }
+			// LOD: only update NPCs within 35 units of any player
+			nx, ny := s.world.PosX[eid], s.world.PosY[eid]
+			near := false
+			for _, pp := range playerPos {
+				dx := int32(nx) - int32(pp[0])
+				dy := int32(ny) - int32(pp[1])
+				if dx*dx+dy*dy <= 35*35 { near = true; break }
+			}
+			if !near { continue }
+			s.world.WanderNPC(eid)
+			aiBudget--
 		}
 	}
-}
 
-type eidDist struct {
-	eid shared.EntityID
-	d2  int32
-}
-
-func (s *Server) stepAndSend(ctx context.Context) {
-	s.mu.Lock()
-	s.stepPhysicsLocked()
+	s.world.StepPhysics()
 	s.rebuildGridLocked()
 
-	tick := s.serverTick
-	sendState := (tick % uint32(s.cfg.StateEveryTicks)) == 0
-	doSave := (tick % uint32(s.cfg.SaveEveryTicks)) == 0
-
-	// transfer detection (toy X boundary)
-	var transfers []struct{
-		sid shared.SessionID
-		cid shared.CharacterID
-		st persist.CharacterState
-	}
-	for _, p := range s.players {
-		if p.Transferring { continue }
-		e := s.ents[p.EID]
-		if e == nil { continue }
-		if s.shouldTransfer(e.X) {
-			p.Transferring = true
-			st := persist.CharacterState{
-				CharacterID: p.CID,
-				ZoneID: shared.ZoneID(s.cfg.ZoneID),
-				X: e.X, Y: e.Y, HP: e.HP,
-				ServerTick: tick,
-			}
-			// enqueue save now (best effort)
-			s.cfg.SaveQ.Enqueue(st)
-			transfers = append(transfers, struct{
-				sid shared.SessionID; cid shared.CharacterID; st persist.CharacterState
-			}{sid: p.SID, cid: p.CID, st: st})
+	// Step13: handle transfer timeouts (abort)
+	for sid, pt := range s.transferPending {
+		if s.serverTick - pt.StartedTick > s.cfg.TransferTimeoutTicks {
+			delete(s.transferPending, sid)
+			_ = wire.WriteFrame(s.w, wire.MsgError, wire.EncodeError(wire.ErrTransfer, "transfer timeout"))
 		}
 	}
 
-	// prepare per-session replication (minimal: move + state + event) within AOI
+	sendState := (s.serverTick % uint32(s.cfg.StateEveryTicks)) == 0
+	doSave := (s.serverTick % uint32(s.cfg.SaveEveryTicks)) == 0
+	doSnap := (s.serverTick % uint32(s.cfg.SnapshotEveryTicks)) == 0
+
+	// detect boundary transfer and emit prepare (Step13)
+	for sid, p := range s.players {
+		if _, pending := s.transferPending[sid]; pending { continue }
+		x := s.world.PosX[p.EID]
+		if s.shouldTransfer(x) {
+			// freeze movement
+			s.world.VelX[p.EID] = 0
+			s.world.VelY[p.EID] = 0
+			pt := &pendingTransfer{
+				TargetZone: shared.ZoneID(s.cfg.TransferTargetZone),
+				StartedTick: s.serverTick,
+				X: s.world.PosX[p.EID],
+				Y: s.world.PosY[p.EID],
+				HP: s.world.HP[p.EID],
+				Interest: p.Interest,
+				CID: p.CID,
+				EID: p.EID,
+			}
+			s.transferPending[sid] = pt
+			// enqueue save of character state
+			s.enqueueCharacterLocked(p.CID, p.EID)
+
+			st := persist.CharacterState{CharacterID: p.CID, ZoneID: shared.ZoneID(s.cfg.ZoneID), X: pt.X, Y: pt.Y, HP: pt.HP, ServerTick: s.serverTick}
+			payload := wire.EncodeTransferPrepare(p.SID, p.CID, pt.TargetZone, pt.Interest, st)
+			_ = wire.WriteFrame(s.w, wire.MsgTransferPrepare, payload)
+			p.pendingEvents = append(p.pendingEvents, "transfer_prepare")
+		}
+	}
+
+	// replication per player (AOI + interest filters)
 	type perOut struct {
 		sid shared.SessionID
 		ev []wire.RepEvent
@@ -307,15 +466,17 @@ func (s *Server) stepAndSend(ctx context.Context) {
 		state []wire.RepEvent
 	}
 	out := make([]perOut, 0, len(s.players))
-	tmp := make([]uint32, 0, 256)
 
-	for _, p := range s.players {
-		if p.Transferring { continue }
-		pe := s.ents[p.EID]
-		if pe == nil { continue }
+	tmp := make([]uint32, 0, 256)
+	for sid, p := range s.players {
+		// if transfer pending, still allow event channel to show "loading" but stop movement/state
+		_, pending := s.transferPending[sid]
+
+		peid := p.EID
+		px, py := s.world.PosX[peid], s.world.PosY[peid]
 
 		tmp = tmp[:0]
-		cands := s.grid.QueryCircle(pe.X, pe.Y, s.cfg.AOIRadius, tmp)
+		cands := s.grid.QueryCircle(px, py, s.cfg.AOIRadius, tmp)
 
 		newSet := make(map[shared.EntityID]struct{}, len(cands))
 		dists := make([]eidDist, 0, len(cands))
@@ -324,7 +485,7 @@ func (s *Server) stepAndSend(ctx context.Context) {
 			newSet[eid] = struct{}{}
 			ex, ey, ok := s.grid.GetPos(eidU)
 			if !ok { continue }
-			dx := int32(ex) - int32(pe.X); dy := int32(ey) - int32(pe.Y)
+			dx := int32(ex) - int32(px); dy := int32(ey) - int32(py)
 			dists = append(dists, eidDist{eid: eid, d2: dx*dx+dy*dy})
 		}
 		sort.Slice(dists, func(i,j int) bool {
@@ -333,92 +494,103 @@ func (s *Server) stepAndSend(ctx context.Context) {
 		})
 
 		ev := make([]wire.RepEvent, 0, 8)
-		if len(p.pendingEvents) > 0 {
-			ev = append(ev, wire.RepEvent{Op: wire.RepEventText, Text: p.pendingEvents[0]})
-			p.pendingEvents = p.pendingEvents[1:]
+		if p.Interest & wire.InterestEvent != 0 {
+			if len(p.pendingEvents) > 0 {
+				ev = append(ev, wire.RepEvent{Op: wire.RepEventText, Text: p.pendingEvents[0]})
+				p.pendingEvents = p.pendingEvents[1:]
+			}
 		}
 
 		move := make([]wire.RepEvent, 0, 64)
 		state := make([]wire.RepEvent, 0, 16)
 
-		for eid := range p.known {
-			if _, ok := newSet[eid]; !ok {
-				move = append(move, wire.RepEvent{Op: wire.RepDespawn, EID: eid})
-				delete(p.known, eid)
-				delete(p.lastSentPos, eid)
-				delete(p.lastSentHP, eid)
-			}
-		}
-		for _, ed := range dists {
-			eid := ed.eid
-			e := s.ents[eid]
-			if e == nil { continue }
-			if _, ok := p.known[eid]; !ok {
-				move = append(move, wire.RepEvent{Op: wire.RepSpawn, EID: eid, X: e.X, Y: e.Y})
-				p.known[eid] = struct{}{}
-				p.lastSentPos[eid] = [2]int16{e.X, e.Y}
-				p.lastSentHP[eid] = e.HP
-			} else {
-				prev := p.lastSentPos[eid]
-				if prev[0] != e.X || prev[1] != e.Y {
-					move = append(move, wire.RepEvent{Op: wire.RepMove, EID: eid, X: e.X, Y: e.Y})
-					p.lastSentPos[eid] = [2]int16{e.X, e.Y}
+		if !pending && (p.Interest & wire.InterestMove != 0) {
+			// despawn
+			for eid := range p.known {
+				if _, ok := newSet[eid]; !ok {
+					move = append(move, wire.RepEvent{Op: wire.RepDespawn, EID: eid})
+					delete(p.known, eid)
+					delete(p.lastSentPos, eid)
+					delete(p.lastSentHP, eid)
 				}
 			}
-			if len(move) >= 256 { break }
-		}
 
-		if sendState {
+			// spawn/move with interest filtering
 			for _, ed := range dists {
 				eid := ed.eid
-				e := s.ents[eid]
-				if e == nil { continue }
+				mask := s.world.Mask[eid]
+				if (mask & p.Interest) == 0 {
+					continue
+				}
+				if _, ok := p.known[eid]; !ok {
+					move = append(move, wire.RepEvent{
+						Op: wire.RepSpawn, EID: eid, X: s.world.PosX[eid], Y: s.world.PosY[eid],
+						Kind: s.world.Kind[eid], Mask: mask,
+					})
+					p.known[eid] = struct{}{}
+					p.lastSentPos[eid] = [2]int16{s.world.PosX[eid], s.world.PosY[eid]}
+					p.lastSentHP[eid] = s.world.HP[eid]
+				} else {
+					prev := p.lastSentPos[eid]
+					if prev[0] != s.world.PosX[eid] || prev[1] != s.world.PosY[eid] {
+						move = append(move, wire.RepEvent{Op: wire.RepMove, EID: eid, X: s.world.PosX[eid], Y: s.world.PosY[eid]})
+						p.lastSentPos[eid] = [2]int16{s.world.PosX[eid], s.world.PosY[eid]}
+					}
+				}
+				if len(move) >= 256 { break }
+			}
+		}
+
+		if !pending && sendState && (p.Interest & wire.InterestState != 0) {
+			for _, ed := range dists {
+				eid := ed.eid
+				mask := s.world.Mask[eid]
+				if (mask & p.Interest) == 0 { continue }
 				if _, ok := p.known[eid]; !ok { continue }
-				if p.lastSentHP[eid] != e.HP {
-					state = append(state, wire.RepEvent{Op: wire.RepStateHP, EID: eid, Val: e.HP})
-					p.lastSentHP[eid] = e.HP
+				if p.lastSentHP[eid] != s.world.HP[eid] {
+					state = append(state, wire.RepEvent{Op: wire.RepStateHP, EID: eid, Val: s.world.HP[eid]})
+					p.lastSentHP[eid] = s.world.HP[eid]
 				}
 				if len(state) >= 64 { break }
 			}
 		}
 
-		// budget (simple): ev->move->state
+		// budget greedy: ev -> move -> state
 		b := s.cfg.BudgetBytes
-		ev = trim(ev, b); b -= est(ev)
-		move = trim(move, b); b -= est(move)
-		state = trim(state, b)
+		ev = trimBudget(ev, b); b -= estSize(ev)
+		move = trimBudget(move, b); b -= estSize(move)
+		state = trimBudget(state, b)
 
 		if len(ev)+len(move)+len(state) > 0 {
 			out = append(out, perOut{sid: p.SID, ev: ev, move: move, state: state})
 		}
 	}
 
-	if doSave {
-		s.enqueueDirtyLocked()
-	}
+	if doSave { s.enqueueDirtyLocked() }
+	if doSnap { s.enqueueSnapshotLocked() }
+
+	// update metrics
+	s.met.Entities.Store(int64(len(s.world.Kind)))
+	s.met.Players.Store(int64(len(s.players)))
+
 	s.mu.Unlock()
 
-	// send replications
 	for _, m := range out {
-		if len(m.ev) > 0 { _ = wire.WriteFrame(s.w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanEvent, m.ev)) }
-		if len(m.move) > 0 { _ = wire.WriteFrame(s.w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanMove, m.move)) }
-		if len(m.state) > 0 { _ = wire.WriteFrame(s.w, wire.MsgReplicate, wire.EncodeReplicate(m.sid, tick, wire.ChanState, m.state)) }
-	}
-
-	// send transfers (after tick outputs)
-	for _, t := range transfers {
-		payload := wire.EncodeTransfer(t.sid, t.cid, shared.ZoneID(s.cfg.TransferTargetZone), t.st)
-		_ = wire.WriteFrame(s.w, wire.MsgTransfer, payload)
-
-		// NOTE (strict): this skeleton immediately removes the entity/player after requesting transfer.
-		// In production: require ACK from gateway + target zone before finalizing.
-		s.mu.Lock()
-		p := s.players[t.sid]
-		if p != nil {
-			delete(s.ents, p.EID)
-			delete(s.players, t.sid)
+		if len(m.ev) > 0 {
+			p := wire.EncodeReplicate(m.sid, s.serverTick, wire.ChanEvent, m.ev)
+			s.met.AddRepBytes(len(p))
+			_ = wire.WriteFrame(s.w, wire.MsgReplicate, p)
 		}
-		s.mu.Unlock()
+		if len(m.move) > 0 {
+			p := wire.EncodeReplicate(m.sid, s.serverTick, wire.ChanMove, m.move)
+			s.met.AddRepBytes(len(p))
+			_ = wire.WriteFrame(s.w, wire.MsgReplicate, p)
+		}
+		if len(m.state) > 0 {
+			p := wire.EncodeReplicate(m.sid, s.serverTick, wire.ChanState, m.state)
+			s.met.AddRepBytes(len(p))
+			_ = wire.WriteFrame(s.w, wire.MsgReplicate, p)
+		}
 	}
 
 	_ = ctx
@@ -431,50 +603,32 @@ func (s *Server) shouldTransfer(x int16) bool {
 	return false
 }
 
-// persistence helpers (call with lock)
-func (s *Server) enqueueCharacterLocked(e *entity, cid shared.CharacterID) {
-	st := persist.CharacterState{
-		CharacterID: cid,
-		ZoneID: shared.ZoneID(s.cfg.ZoneID),
-		X: e.X, Y: e.Y, HP: e.HP,
-		ServerTick: s.serverTick,
-	}
-	s.cfg.SaveQ.Enqueue(st)
-	e.Dirty = false
-}
-func (s *Server) enqueueDirtyLocked() {
-	for _, p := range s.players {
-		e := s.ents[p.EID]
-		if e != nil && e.Dirty {
-			s.enqueueCharacterLocked(e, p.CID)
-		}
-	}
-}
-
-// budget helpers (coarse; same for all channels here)
-func est(evs []wire.RepEvent) int {
+// budget estimation for wire.RepEvent list (coarse upper bound)
+func estSize(evs []wire.RepEvent) int {
 	sz := 23
 	for _, e := range evs {
 		switch e.Op {
-		case wire.RepSpawn, wire.RepMove:
-			sz += 9
+		case wire.RepSpawn:
+			sz += 1+4+1+4+4
+		case wire.RepMove:
+			sz += 1+4+4
 		case wire.RepDespawn:
-			sz += 5
+			sz += 1+4
 		case wire.RepStateHP:
-			sz += 7
+			sz += 1+4+2
 		case wire.RepEventText:
 			l := len(e.Text); if l > 65535 { l = 65535 }
-			sz += 3 + l
+			sz += 1+2+l
 		}
 	}
 	return sz
 }
-func trim(evs []wire.RepEvent, budget int) []wire.RepEvent {
+func trimBudget(evs []wire.RepEvent, budget int) []wire.RepEvent {
 	if budget <= 23 { return evs[:0] }
 	out := evs[:0]
 	for _, e := range evs {
 		out = append(out, e)
-		if est(out) > budget {
+		if estSize(out) > budget {
 			out = out[:len(out)-1]
 			break
 		}
