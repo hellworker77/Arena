@@ -419,7 +419,7 @@ func (s *Server) zoneReadLoop(ctx context.Context, zl *zoneLink) {
 		case wire.MsgAttachAck:
 			s.tryCommitOnAttachAck(zl.id)
 		case wire.MsgReplicate:
-			sid, _, ch, events, err := wire.DecodeReplicate(fr.Payload)
+			sid, serverTick, ch, events, err := wire.DecodeReplicate(fr.Payload)
 			if err != nil { continue }
 			st, ok := s.getBySID(sid)
 			if !ok { continue }
@@ -429,17 +429,17 @@ func (s *Server) zoneReadLoop(ctx context.Context, zl *zoneLink) {
 				for _, ev := range events {
 					switch ev.Op {
 					case wire.RepSpawn:
-						s.sendUnreliableRep(st, sprintf("SPAWN %d %d %d kind=%d mask=%d", uint32(ev.EID), ev.X, ev.Y, ev.Kind, uint32(ev.Mask)))
+						s.sendUnreliableRep(st, sprintf("T %d SPAWN %d %d %d kind=%d mask=%d", serverTick, uint32(ev.EID), ev.X, ev.Y, ev.Kind, uint32(ev.Mask)))
 					case wire.RepDespawn:
-						s.sendUnreliableRep(st, sprintf("DESPAWN %d", uint32(ev.EID)))
+						s.sendUnreliableRep(st, sprintf("T %d DESPAWN %d", serverTick, uint32(ev.EID)))
 					case wire.RepMove:
-						s.sendUnreliableRep(st, sprintf("MOV %d %d %d", uint32(ev.EID), ev.X, ev.Y))
+						s.sendUnreliableRep(st, sprintf("T %d MOV %d %d %d", serverTick, uint32(ev.EID), ev.X, ev.Y))
 					}
 				}
 			case wire.ChanState:
 				for _, ev := range events {
 					if ev.Op == wire.RepStateHP {
-						s.sendUnreliableRep(st, sprintf("STAT %d hp=%d", uint32(ev.EID), ev.Val))
+						s.sendUnreliableRep(st, sprintf("T %d STAT %d hp=%d", serverTick, uint32(ev.EID), ev.Val))
 					}
 				}
 			case wire.ChanEvent:

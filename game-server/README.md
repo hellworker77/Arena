@@ -1,28 +1,30 @@
-# MMORPG 2D — Step 22: congestion control + pacing + adaptive RTO
+# MMORPG 2D — Step 23: clock sync + interpolation buffer (client-side)
 
-Builds on Step 21 (reliable UDP seq/ack/ackBits) and adds **production-critical guards**:
+Builds on Step 22 (reliable UDP + congestion control) and adds:
 
 ## Added
-- **Per-session token bucket** (bytes/sec + burst) for *all* outbound UDP.
-- **Unreliable drop on budget**: replicate lines are dropped when over budget.
-- **Reliable backlog cap**: pending reliable bytes are capped; on overflow the session is dropped (strict).
-- **Adaptive RTO** using RTT samples from ACKed reliable packets (Jacobson/Karels).
-- **Pacing**: retransmits and new reliable sends also respect the token bucket.
+- Gateway tags every replication line with `serverTick`.
+- Client maintains a **serverTick ↔ local time** mapping (simple sync).
+- Client keeps a per-entity **sample buffer** and renders **interpolated** positions
+  at `now - interpDelay` (default 150ms) to smooth jitter.
+
+This is intentionally minimal:
+- No fancy drift correction (PLL), no packet timestamp echo, no client-side prediction.
+- But it demonstrates the correct MMO pattern: **buffer + interpolate**, not "render immediately".
 
 ## Run
-Same as Step 21, plus optional gateway knobs:
+Same as Step 22.
 
-Gateway:
+Client flags:
 ```bash
-go run ./cmd/gateway -udp :7777 -zone 1=127.0.0.1:4000 -zone 2=127.0.0.1:4001 -proto 1 \
-  -rateBps 20000 -burst 40000 -maxReliableBytes 65536
+go run ./cmd/client -addr 127.0.0.1:7777 -proto 1 -char 1 -interpMs 150 -tickHz 20
 ```
 
-Client:
-```bash
-go run ./cmd/client -addr 127.0.0.1:7777 -proto 1 -char 1
-```
+In client:
+- `m dx dy` movement (unreliable)
+- `a skill targetEID` action (reliable)
+- `q` quit
 
-Notes:
-- This is still a skeleton: no CC like BBR/CUBIC, no encryption, no compression.
-- But these guards prevent the classic "reliable UDP melts under loss" failure mode.
+Output:
+- Raw lines are still printed (EV/STAT etc).
+- Interpolated positions print periodically as `RENDER tick=<t> eid=<id> x=<..> y=<..>`.
