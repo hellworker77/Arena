@@ -7,15 +7,15 @@ use std::{
     time::Duration,
 };
 
+use crate::bootstrap::bootstrap;
+use crate::rest::SharedStore;
+use crate::shutdown::shutdown_signal;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use tokio::sync::broadcast;
-use tokio::time::interval;
-use tower::ServiceExt;
-use crate::bootstrap::bootstrap;
-use crate::rest::SharedStore;
-use crate::shutdown::shutdown_signal;
+use tokio::task::JoinSet;
+use tokio::time::{interval, timeout};
 
 mod bootstrap;
 mod compaction;
@@ -29,6 +29,8 @@ mod segment;
 mod shutdown;
 mod store;
 mod wal;
+
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,9 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut s = shared.lock().await;
                         let _ = s.checkpoint();
                     }
-                    _ = shutdown_rx.recv() => {
-                        break;
-                    }
+                    _ = shutdown_rx.recv() => break,
                 }
             }
 
@@ -78,12 +78,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Shutdown gate for accept loop
     let (accept_stop_tx, mut accept_stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Accept loop: stop accepting new TCP connections once shutdown begins.
-    let server_task = tokio::spawn(async move {
+    let app_for_accept = app.clone();
+    let shutdown_for_accept = shutdown_tx.clone();
+
+    // Accept loop
+    let accept_task = tokio::spawn(async move {
+        let mut conns: JoinSet<()> = JoinSet::new();
+
         loop {
             tokio::select! {
                 _ = &mut accept_stop_rx => {
-                    // Stop accepting new connections.
                     break;
                 }
                 res = listener.accept() => {
@@ -92,40 +96,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(_) => continue,
                     };
 
-                    let io = TokioIo::new(stream);
-                    let svc = app.clone().into_service();
-                    let hyper_svc = TowerToHyperService::new(svc);
+                    let app = app_for_accept.clone();
+                    let mut shutdown_rx = shutdown_for_accept.subscribe();
 
-                    // HTTP/1 connection builder:
-                    // - Disable keep-alive for tighter draining behavior.
-                    // - This affects only new connections; existing ones will finish in-flight requests.
-                    tokio::spawn(async move {
-                        let conn = http1::Builder::new()
-                            .keep_alive(false) // limit keep-alive
+                    conns.spawn(async move {
+                        let io = TokioIo::new(stream);
+
+                        // Adapt tower::Service (axum) into hyper::Service.
+                        let svc = app.into_service();
+                        let hyper_svc = TowerToHyperService::new(svc);
+
+                        // HTTP/1 only here:
+                        // - keep-alive disabled to reduce long-lived idle connections
+                        // - draining is handled by:
+                        //   - stop accepting new TCP connections
+                        //   - `Connection: close` header during draining
+                        //   - write rejection middleware
+                        let conn_fut = http1::Builder::new()
+                            .keep_alive(false)
                             .serve_connection(io, hyper_svc);
 
-                        let _ = conn.await;
+                        tokio::select! {
+                            _ = shutdown_rx.recv() => {
+                                // Best-effort: stop waiting; dropping future will close the socket.
+                                // This is a hard stop for this connection.
+                            }
+                            _ = conn_fut => {}
+                        }
                     });
                 }
             }
         }
+
+        // Drain existing connections spawned by this accept loop with a timeout.
+        let _ = timeout(DRAIN_TIMEOUT, async {
+            while let Some(_res) = conns.join_next().await {}
+        })
+        .await;
     });
 
     // Wait for shutdown signal
     shutdown_signal().await;
     println!("shutdown signal received");
 
-    // Enter draining mode: stop writes + mark not ready
+    // Enter draining mode
     ready.store(false, Ordering::Relaxed);
 
-    // Notify background workers
+    // Notify workers and connections
     let _ = shutdown_tx.send(());
 
     // Stop accepting new connections
     let _ = accept_stop_tx.send(());
 
-    // Wait for accept loop to stop
-    let _ = server_task.await;
+    // Wait for accept loop and connection drain to finish (bounded)
+    let _ = timeout(DRAIN_TIMEOUT, accept_task).await;
 
     println!("server exited cleanly");
     Ok(())
