@@ -1,6 +1,7 @@
 mod middleware;
 pub mod probes;
 mod state;
+mod drain;
 
 use crate::error::error::StoreError;
 use crate::rest::probes::{livez, readyz};
@@ -23,9 +24,9 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use axum::middleware::from_fn_with_state;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+use crate::rest::drain::add_connection_close_when_draining;
 use crate::rest::middleware::reject_writes_when_not_ready;
 
 pub type SharedStore = Arc<tokio::sync::Mutex<ObjectStore>>;
@@ -61,9 +62,13 @@ pub fn router_v1(store: SharedStore, ready_flag: Arc<std::sync::atomic::AtomicBo
         .route("/api/v1/livez", get(livez))
         .route("/api/v1/readyz", get(readyz))
         .route("/metrics", get(metrics))
-        .layer(from_fn_with_state(
+        .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             reject_writes_when_not_ready,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            add_connection_close_when_draining,
         ))
         .with_state(state)
 }

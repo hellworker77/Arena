@@ -1,25 +1,34 @@
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+use hyper::server::conn::http1;
+use hyper_util::rt::TokioIo;
+use hyper_util::service::TowerToHyperService;
+use tokio::sync::broadcast;
+use tokio::time::interval;
+use tower::ServiceExt;
 use crate::bootstrap::bootstrap;
 use crate::rest::SharedStore;
 use crate::shutdown::shutdown_signal;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio::time::interval;
 
-mod error;
 mod bootstrap;
-mod wal;
-mod manifest;
-mod segment;
-mod index;
-mod recovery;
-mod store;
-mod gc;
 mod compaction;
+mod error;
+mod gc;
+mod index;
+mod manifest;
+mod recovery;
 mod rest;
+mod segment;
 mod shutdown;
+mod store;
+mod wal;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,7 +66,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // final checkpoint
             let mut s = shared.lock().await;
             let _ = s.checkpoint();
-            println!("background worker stopped");
         });
     }
 
@@ -65,20 +73,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr: SocketAddr = "0.0.0.0:8080".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-
     println!("listening on http://{}", addr);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+    // Shutdown gate for accept loop
+    let (accept_stop_tx, mut accept_stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-            // Stop accepting traffic
-            ready.store(false, Ordering::Relaxed);
+    // Accept loop: stop accepting new TCP connections once shutdown begins.
+    let server_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut accept_stop_rx => {
+                    // Stop accepting new connections.
+                    break;
+                }
+                res = listener.accept() => {
+                    let (stream, _peer) = match res {
+                        Ok(x) => x,
+                        Err(_) => continue,
+                    };
 
-            // Notify background workers
-            let _ = shutdown_tx.send(());
-        })
-        .await?;
+                    let io = TokioIo::new(stream);
+                    let svc = app.clone().into_service();
+                    let hyper_svc = TowerToHyperService::new(svc);
+
+                    // HTTP/1 connection builder:
+                    // - Disable keep-alive for tighter draining behavior.
+                    // - This affects only new connections; existing ones will finish in-flight requests.
+                    tokio::spawn(async move {
+                        let conn = http1::Builder::new()
+                            .keep_alive(false) // limit keep-alive
+                            .serve_connection(io, hyper_svc);
+
+                        let _ = conn.await;
+                    });
+                }
+            }
+        }
+    });
+
+    // Wait for shutdown signal
+    shutdown_signal().await;
+    println!("shutdown signal received");
+
+    // Enter draining mode: stop writes + mark not ready
+    ready.store(false, Ordering::Relaxed);
+
+    // Notify background workers
+    let _ = shutdown_tx.send(());
+
+    // Stop accepting new connections
+    let _ = accept_stop_tx.send(());
+
+    // Wait for accept loop to stop
+    let _ = server_task.await;
 
     println!("server exited cleanly");
     Ok(())
