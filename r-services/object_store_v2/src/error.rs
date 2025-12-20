@@ -44,6 +44,9 @@ pub mod error {
 
         #[error("cas references unknown segment id {0}")]
         CasDanglingSegment(u64),
+
+        #[error("GC invariant violation")]
+        GcInvariantViolation,
     }
 
     pub type StoreResult<T> = Result<T, StoreError>;

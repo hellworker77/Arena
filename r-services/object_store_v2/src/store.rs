@@ -7,6 +7,8 @@ use crate::wal::{Wal, WalRecord};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use crate::gc::config::GcConfig;
+use crate::gc::{executor, planner, snapshot};
 
 pub const SEG_OBJ_HDR_LEN: u64 = 32 + 12 + 8 + 8; // hash+nonce+size_plain+size_cipher
 
@@ -53,6 +55,44 @@ pub struct ObjectStore {
 }
 
 impl ObjectStore {
+
+    /// Best-effort GC + compaction.
+    /// - Never touches active segment
+    /// - Never panics
+    /// - Safe to call periodically
+    /// - If thresholds are not met, does nothing
+    pub fn try_gc_compact(&mut self, cfg: &GcConfig) -> StoreResult<()> {
+        // 1) Build snapshot (read-only, no side effects)
+        let snap = snapshot::build_snapshot(
+            self.cas.map.clone(),
+            &self.key_store,
+            self.segments.clone(),
+            self.active_segment_id(),
+            self.sealed_segment_ids(),
+        )?;
+
+        // 2) Build GC plan based on thresholds
+        let plan = planner::build_plan(cfg, &snap);
+
+        // 3) Nothing to do — exit fast
+        if plan.actions.is_empty() {
+            return Ok(());
+        }
+
+        // 4) Execute plan (manifest-driven, crash-safe)
+        let segments_dir = self.segments_dir();
+
+        executor::execute_plan(
+            &plan,
+            &snap,
+            &mut self.manifest,
+            &segments_dir,
+        )?;
+
+        Ok(())
+    }
+
+
     pub fn put(&mut self, key: String, plain: &[u8]) -> StoreResult<()> {
         self.rotate_if_needed()?;
         let hash = sha256(plain);
@@ -227,5 +267,28 @@ impl ObjectStore {
         self.segment = SegmentWriter::create(&new_path, new_id)?;
 
         Ok(())
+    }
+
+    fn active_segment_id(&self) -> u64 {
+        self.segment.segment_id
+    }
+
+    fn sealed_segment_ids(&self) -> std::collections::HashSet<u64> {
+        self.segments
+            .keys()
+            .copied()
+            .filter(|id| *id != self.active_segment_id())
+            .collect()
+    }
+
+    fn segments_dir(&self) -> std::path::PathBuf {
+        // All segment paths already live under one directory.
+        // We reuse any existing segment path to infer the directory.
+        self.segments
+            .values()
+            .next()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .expect("segments directory must exist")
     }
 }

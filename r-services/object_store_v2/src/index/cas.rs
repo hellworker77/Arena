@@ -3,29 +3,13 @@ use std::fs::{create_dir_all, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use crate::error::error::{StoreError, StoreResult};
+use crate::index::io::{read_len_prefixed, write_len_prefixed};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CasRecord {
     Add { hash: [u8; 32], segment_id: u64, offset: u64, size: u64 },
     RefInc { hash: [u8; 32] },
     RefDec { hash: [u8; 32] },
-}
-
-fn write_len_prefixed(file: &mut File, bytes: &[u8]) -> StoreResult<()> {
-    file.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-fn read_len_prefixed(file: &mut File) -> StoreResult<Option<Vec<u8>>> {
-    let mut len = [0u8; 4];
-    if file.read_exact(&mut len).is_err() {
-        return Ok(None);
-    }
-    let n = u32::from_le_bytes(len) as usize;
-    let mut buf = vec![0u8; n];
-    file.read_exact(&mut buf)?;
-    Ok(Some(buf))
 }
 
 pub struct CasIndexStore {

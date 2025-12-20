@@ -1,24 +1,33 @@
+mod middleware;
+pub mod probes;
+mod state;
+mod drain;
+
 use crate::error::error::StoreError;
+use crate::rest::probes::{livez, readyz};
+use crate::rest::state::AppState;
 use crate::store::ObjectStore;
 use axum::body::to_bytes;
 use axum::response::Response;
 use axum::{
+    Router,
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{delete, get, put},
-    Router,
 };
 use std::{
     ops::RangeInclusive,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+use crate::rest::drain::add_connection_close_when_draining;
+use crate::rest::middleware::reject_writes_when_not_ready;
 
 pub type SharedStore = Arc<tokio::sync::Mutex<ObjectStore>>;
 
@@ -34,25 +43,33 @@ pub struct Metrics {
     pub precondition_failed: AtomicU64,
 }
 
-#[derive(Clone)]
-pub struct AppState {
-    pub store: SharedStore,
-    pub metrics: Arc<Metrics>,
-}
-
-pub fn router_v1(store: SharedStore) -> Router {
+pub fn router_v1(store: SharedStore, ready_flag: Arc<std::sync::atomic::AtomicBool>) -> Router {
     let state = AppState {
         store,
         metrics: Arc::new(Metrics::default()),
+        ready: ready_flag,
     };
 
     Router::new()
         .route("/api/v1/health", get(health))
         .route(
             "/api/v1/objects/{key}",
-            get(get_object).head(head_object).put(put_object).delete(delete_object),
+            get(get_object)
+                .head(head_object)
+                .put(put_object)
+                .delete(delete_object),
         )
+        .route("/api/v1/livez", get(livez))
+        .route("/api/v1/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            reject_writes_when_not_ready,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            add_connection_close_when_draining,
+        ))
         .with_state(state)
 }
 
@@ -75,7 +92,9 @@ async fn put_object(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    st.metrics.bytes_in.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    st.metrics
+        .bytes_in
+        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
 
     let mut store = st.store.lock().await;
     match store.put(key, &bytes) {
@@ -105,7 +124,9 @@ async fn get_object(
     // ETag preconditions
     if let Some(if_match) = headers.get(header::IF_MATCH) {
         if if_match.to_str().ok().map(|s| s != etag).unwrap_or(true) {
-            st.metrics.precondition_failed.fetch_add(1, Ordering::Relaxed);
+            st.metrics
+                .precondition_failed
+                .fetch_add(1, Ordering::Relaxed);
             return StatusCode::PRECONDITION_FAILED.into_response();
         }
     }
@@ -146,7 +167,11 @@ async fn get_object(
 
     // Seek to payload start + range start
     let mut file = file;
-    if file.seek(std::io::SeekFrom::Start(payload_off + start)).await.is_err() {
+    if file
+        .seek(std::io::SeekFrom::Start(payload_off + start))
+        .await
+        .is_err()
+    {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
@@ -173,10 +198,7 @@ async fn get_object(
 
 // ---------- DELETE ----------
 
-async fn delete_object(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> impl IntoResponse {
+async fn delete_object(State(st): State<AppState>, Path(key): Path<String>) -> impl IntoResponse {
     st.metrics.delete_requests.fetch_add(1, Ordering::Relaxed);
 
     let mut store = st.store.lock().await;
