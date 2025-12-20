@@ -4,28 +4,12 @@ use std::fs::{create_dir_all, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use crate::error::error::StoreResult;
+use crate::index::io::{read_len_prefixed, write_len_prefixed};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyRecord {
     Put { key: String, version: u32, hash: [u8; 32], ts: u64 },
     Delete { key: String, version: u32, ts: u64 },
-}
-
-fn write_len_prefixed(file: &mut File, bytes: &[u8]) -> StoreResult<()> {
-    file.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-fn read_len_prefixed(file: &mut File) -> StoreResult<Option<Vec<u8>>> {
-    let mut len = [0u8; 4];
-    if file.read_exact(&mut len).is_err() {
-        return Ok(None);
-    }
-    let n = u32::from_le_bytes(len) as usize;
-    let mut buf = vec![0u8; n];
-    file.read_exact(&mut buf)?;
-    Ok(Some(buf))
 }
 
 pub struct KeyIndexStore {
@@ -63,7 +47,7 @@ impl KeyIndexStore {
         Ok(())
     }
 
-    /// Minimal (but correct) latest lookup: mem first, then SST newest->oldest linear scan.
+    /// Minimal (but correct) latest lookup: mem first, then SST newest->the oldest linear scan.
     /// Production: add index/bloom/binary search later.
     pub fn get_latest(&self, key: &str) -> Option<KeyRecord> {
         if let Some(r) = self.mem.get(key) {
@@ -91,5 +75,65 @@ impl KeyIndexStore {
             }
         }
         None
+    }
+
+    /// Returns the latest visible KeyRecord for every key.
+    ///
+    /// Semantics:
+    /// - memtable overrides SSTables
+    /// - SSTables are scanned from newest to oldest
+    /// - the first occurrence of a key wins
+    /// - Delete records are included (tombstones)
+    ///
+    /// Complexity:
+    /// - O(mem + total_sst_records)
+    /// - Acceptable for GC / maintenance paths
+    pub fn iter_latest(&self) -> StoreResult<Vec<KeyRecord>> {
+        let mut seen: HashMap<String, KeyRecord> = HashMap::new();
+
+        // 1) Memtable has the highest priority.
+        for (key, rec) in self.mem.iter() {
+            seen.insert(key.clone(), rec.clone());
+        }
+
+        // 2) SSTables: newest -> oldest.
+        for sst in self.sstables.iter().rev() {
+            let mut f = File::open(sst)?;
+
+            let mut magic = [0u8; 4];
+            f.read_exact(&mut magic)?;
+            if &magic != b"KEY1" {
+                // Corrupt or foreign file; skip defensively.
+                continue;
+            }
+
+            let mut cnt = [0u8; 4];
+            f.read_exact(&mut cnt)?;
+            let n = u32::from_le_bytes(cnt);
+
+            for _ in 0..n {
+                let buf = match read_len_prefixed(&mut f)? {
+                    Some(b) => b,
+                    None => break,
+                };
+
+                let rec: KeyRecord = match bincode::deserialize(&buf) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+
+                let key = match &rec {
+                    KeyRecord::Put { key, ..} => key,
+                    KeyRecord::Delete { key, ..} => key,
+                };
+
+                // First occurrence wins (newest).
+                if !seen.contains_key(key) {
+                    seen.insert(key.clone(), rec);
+                }
+            }
+        }
+
+        Ok(seen.into_values().collect())
     }
 }

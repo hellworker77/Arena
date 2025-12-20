@@ -3,6 +3,10 @@ name = "object_store_v2"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "object_store_v2"
+path = "src/lib.rs"
+
 [dependencies]
 serde = { version = "1.0.188", features = ["derive"] }
 bincode = "1.3.3"
